@@ -2,6 +2,7 @@
 
 mod cli;
 mod status;
+mod tui;
 
 use anyhow::{Result, bail};
 use clap::Parser;
@@ -16,7 +17,9 @@ use tracing_subscriber::EnvFilter;
 async fn main() -> ExitCode {
     let cli = Cli::parse();
     let verbose = cli.global.verbose;
-    init_tracing(verbose);
+    // The TUI owns the terminal, so it logs to a file instead of stderr.
+    let log_to_file = matches!(cli.command, None | Some(Command::Tui));
+    init_tracing(verbose, log_to_file);
     match run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -40,7 +43,9 @@ fn error_message(e: &anyhow::Error, verbose: bool) -> String {
     }
 }
 
-fn init_tracing(verbose: u8) {
+/// Log to stderr, or to `~/.local/share/dlux/dlux.log` when `to_file` (falling back to no
+/// logging if the file cannot be opened).
+fn init_tracing(verbose: u8, to_file: bool) {
     let default = match verbose {
         0 => "warn",
         1 => "info",
@@ -48,11 +53,26 @@ fn init_tracing(verbose: u8) {
         _ => "trace",
     };
     let filter = EnvFilter::try_from_env("DLUX_LOG").unwrap_or_else(|_| EnvFilter::new(default));
-    tracing_subscriber::fmt()
+    let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .with_target(false)
-        .init();
+        .with_target(false);
+    if to_file {
+        let dir = paths::data_dir();
+        let file = std::fs::create_dir_all(&dir).and_then(|()| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("dlux.log"))
+        });
+        if let Ok(file) = file {
+            builder
+                .with_ansi(false)
+                .with_writer(std::sync::Mutex::new(file))
+                .init();
+        }
+    } else {
+        builder.with_writer(std::io::stderr).init();
+    }
 }
 
 fn config_path(global: &GlobalArgs) -> PathBuf {
@@ -84,25 +104,27 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Config(cmd) => config_command(&cli.global, cmd),
         Command::Serve(args) => serve(&cli.global, &args),
         Command::Tui => {
-            // The interactive TUI lands in milestone 2. Until then show the status overview.
-            eprintln!(
-                "dlux: the interactive TUI is not built yet; showing `dlux status` instead.\n"
-            );
-            with_aria2(&cli.global, async |aria2| status::print(aria2, false).await).await
+            with_aria2(&cli.global, async |aria2, cfg| tui::run(aria2, cfg).await).await
         }
         Command::Status { json } => {
-            with_aria2(&cli.global, async |aria2| status::print(aria2, json).await).await
+            with_aria2(&cli.global, async |aria2, _| {
+                status::print(aria2, json).await
+            })
+            .await
         }
     }
 }
 
 /// Connect to (or spawn) aria2, run `f`, and always stop a spawned aria2 afterwards — also on
 /// error and on Ctrl-C.
-async fn with_aria2(global: &GlobalArgs, f: impl AsyncFnOnce(&Aria2) -> Result<()>) -> Result<()> {
+async fn with_aria2(
+    global: &GlobalArgs,
+    f: impl AsyncFnOnce(&Aria2, &Config) -> Result<()>,
+) -> Result<()> {
     let cfg = load_config(global)?;
     let aria2 = aria2::connect(&ConnectOptions::from_config(&cfg)).await?;
     let result = tokio::select! {
-        r = f(&aria2) => r,
+        r = f(&aria2, &cfg) => r,
         _ = tokio::signal::ctrl_c() => Err(anyhow::anyhow!("interrupted")),
     };
     aria2.shutdown().await;

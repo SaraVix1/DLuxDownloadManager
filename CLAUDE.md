@@ -29,10 +29,14 @@ web/                    # (milestone 7) Svelte/React + Vite + Tailwind frontend,
   sent as `"token:<secret>"` first param). Numbers in aria2 responses are strings — parse them.
 - Startup: try to connect to a running aria2. If none answers and the RPC URL is local, spawn
   `aria2c --enable-rpc` as a child process with a random secret (passed via a 0600 conf file, not
-  argv), `--stop-with-process=<our pid>` as a safety net, and shut it down (`aria2.shutdown`, then
-  kill) on exit.
+  argv), `--stop-with-process=<our pid>` as a safety net, and shut it down on exit (SIGTERM on
+  Unix — aria2 saves its session and exits in ~1 s, while the `aria2.shutdown` RPC lingers ~4 s;
+  RPC shutdown on Windows; kill as a last resort).
 - Module split in `dlux-core`: `rpc` (client + types), `aria2` (connect/spawn), `config`, `paths`,
-  later `state` (app state / polling snapshot), `ytdlp`, `binaries`. In `dlux`: `cli`, `tui`, `web`.
+  `fmt`, `state` (app state, filters, speed history, poller), later `ytdlp`, `binaries`.
+  In `dlux`: `cli`, `status`, `tui` (`app` state/input, `ui` rendering, `theme`, `terminal`), later
+  `web`.
+- MSRV: Rust 1.88 (required by ratatui 0.30). Edition 2024.
 - Both front ends consume the same core: a polling loop builds a `Snapshot` (global stat + active +
   waiting + stopped via `system.multicall`) once per second.
 
@@ -90,7 +94,7 @@ details. Keyboard too: j/k, a, p, r, d, tab, ?, q.
 - Publish to crates.io. README (screenshots, install, keybinding + mouse table), CONTRIBUTING.md,
   CODE_OF_CONDUCT.md, issue/PR templates.
 - Conventional commits (`feat:`, `fix:`, `docs:`, `chore:`). One branch + one PR per milestone,
-  squash merge, linear history. Changelog/version bumps via release-please or git-cliff; tags `v0.1.0`.
+  named `feat/<topic>` (e.g. `feat/tui-layout`), squash merge, linear history. Changelog/version bumps via release-please or git-cliff; tags `v0.1.0`.
 
 ## Quality bar
 
@@ -101,7 +105,7 @@ details. Keyboard too: j/k, a, p, r, d, tab, ?, q.
 ## Milestones (one PR each; stop after each for review)
 
 1. [x] CLAUDE.md, workspace skeleton, aria2 RPC client, aria2 auto-spawn
-2. [ ] TUI layout, theme, live list, speed graph
+2. [x] TUI layout, theme, live list, speed graph
 3. [ ] Complete mouse support and keyboard shortcuts
 4. [ ] Add dialog (URLs, magnets, torrents) and download controls
 5. [ ] yt-dlp and ffmpeg integration with the format picker
@@ -114,4 +118,14 @@ details. Keyboard too: j/k, a, p, r, d, tab, ?, q.
 - **M1**: workspace with `dlux-core` + `dlux`. `dlux status` prints aria2 version, global stats and
   downloads (smoke test for the RPC client). `dlux` (TUI) and `dlux serve` are placeholders until
   M2/M6. Integration tests in `crates/dlux-core/tests/` spawn a real `aria2c` and are skipped when it
-  is not installed.
+  is not installed. Merged as PR #1.
+- **M2** (branch `feat/tui-layout`): `dlux` opens the TUI. Header (logo, aria2 status, ↓/↑ pills),
+  60 s braille speed graph (nice 1/1.5/2/3/5/7.5 scale in binary units), pill filter tabs with
+  counts, 3-row download cards (half-cell smooth progress bar coloured by state), details pane,
+  toolbar buttons (render only; enabled/disabled by selection), key-hint line. Responsive: details
+  beside the list at ≥110 cols, toggled with Enter below/instead of the list on narrow terminals;
+  graph dropped under 24 rows; compact header under 16 rows. Truecolor detection with xterm-256
+  fallback; `ui.theme` = `tokyo-night` | `tokyo-night-storm`. Keys working in M2: q/Esc/Ctrl-C,
+  tab/shift-tab/1-4, j/k/arrows/PgUp/PgDn/g/G, Enter. Mouse capture is on and `App::hits` records
+  tab/card/button/scrollbar rects for M3. TUI logs go to `~/.local/share/dlux/dlux.log`.
+  Screenshots in `docs/screenshots/`.

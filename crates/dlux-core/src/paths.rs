@@ -84,10 +84,10 @@ pub fn expand_tilde(path: impl AsRef<Path>) -> PathBuf {
     if s == "~" {
         return home().unwrap_or_else(|| path.to_path_buf());
     }
-    if let Some(rest) = s.strip_prefix("~/").or_else(|| s.strip_prefix("~\\")) {
-        if let Some(h) = home() {
-            return h.join(rest);
-        }
+    if let Some(rest) = s.strip_prefix("~/").or_else(|| s.strip_prefix("~\\"))
+        && let Some(h) = home()
+    {
+        return h.join(rest);
     }
     path.to_path_buf()
 }
