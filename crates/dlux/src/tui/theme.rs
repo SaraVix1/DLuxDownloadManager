@@ -12,8 +12,10 @@ pub struct Theme {
     pub bg: Color,
     /// Darker background (pill text, header).
     pub bg_dark: Color,
-    /// Selection / hover background.
+    /// Selection background.
     pub bg_highlight: Color,
+    /// Mouse-hover background: between `bg` and `bg_highlight`.
+    pub bg_hover: Color,
     /// Panel borders.
     pub border: Color,
     /// Borders of the focused panel.
@@ -45,6 +47,7 @@ impl Theme {
         bg: rgb(0x1a1b26),
         bg_dark: rgb(0x16161e),
         bg_highlight: rgb(0x292e42),
+        bg_hover: rgb(0x21232f),
         border: rgb(0x3b4261),
         border_focus: rgb(0x7aa2f7),
         fg: rgb(0xc0caf5),
@@ -66,7 +69,8 @@ impl Theme {
     pub const TOKYO_NIGHT_STORM: Theme = Theme {
         bg: rgb(0x24283b),
         bg_dark: rgb(0x1f2335),
-        bg_highlight: rgb(0x292e42),
+        bg_highlight: rgb(0x2f344d),
+        bg_hover: rgb(0x292e42),
         ..Self::TOKYO_NIGHT
     };
 
@@ -96,6 +100,7 @@ impl Theme {
             bg: m(self.bg),
             bg_dark: m(self.bg_dark),
             bg_highlight: m(self.bg_highlight),
+            bg_hover: m(self.bg_hover),
             border: m(self.border),
             border_focus: m(self.border_focus),
             fg: m(self.fg),

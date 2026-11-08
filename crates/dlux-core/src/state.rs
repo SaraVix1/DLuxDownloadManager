@@ -3,8 +3,9 @@
 
 use crate::rpc::{Client, Download, DownloadStatus, GlobalStat, Snapshot};
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 
 /// Number of samples kept for the speed graph (one per poll, i.e. the last 60 s).
@@ -157,6 +158,13 @@ impl AppState {
         self.loaded = true;
     }
 
+    /// Apply an out-of-schedule snapshot without adding a speed sample.
+    pub fn apply_refresh(&mut self, snapshot: Snapshot) {
+        self.snapshot = snapshot;
+        self.error = None;
+        self.loaded = true;
+    }
+
     /// Record a failed poll. The graph keeps moving (with zero speed) so it stays in sync with
     /// wall-clock time.
     pub fn apply_error(&mut self, error: String) {
@@ -167,6 +175,7 @@ impl AppState {
     pub fn handle(&mut self, event: PollEvent) {
         match event {
             PollEvent::Snapshot(s) => self.apply(s),
+            PollEvent::Refresh(s) => self.apply_refresh(s),
             PollEvent::Error(e) => self.apply_error(e),
         }
     }
@@ -201,32 +210,70 @@ impl AppState {
 /// Result of one poll.
 #[derive(Debug, Clone)]
 pub enum PollEvent {
+    /// A scheduled poll: one per interval, recorded in the speed history.
     Snapshot(Snapshot),
+    /// An extra poll requested with [`PollerHandle::refresh`] (e.g. right after pausing a
+    /// download). Updates the list but not the speed history, which stays one sample per tick.
+    Refresh(Snapshot),
     Error(String),
 }
 
+/// Controls a poller started with [`spawn_poller`]. Dropping it stops the poller.
+#[derive(Debug)]
+pub struct PollerHandle {
+    refresh: Arc<Notify>,
+    task: JoinHandle<()>,
+}
+
+impl PollerHandle {
+    /// Poll again now instead of waiting for the next tick. Requests made while a poll is in
+    /// flight are coalesced into one.
+    pub fn refresh(&self) {
+        self.refresh.notify_one();
+    }
+
+    /// A cheap handle for requesting refreshes from other tasks.
+    pub fn refresher(&self) -> Arc<Notify> {
+        Arc::clone(&self.refresh)
+    }
+}
+
+impl Drop for PollerHandle {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 /// Poll aria2 every `interval` on a background task, sending results to the returned channel.
-/// The first poll happens immediately. The task ends when the receiver is dropped.
+/// The first poll happens immediately. The task ends when the receiver or the handle is dropped.
 pub fn spawn_poller(
     client: Client,
     interval: Duration,
-) -> (mpsc::Receiver<PollEvent>, JoinHandle<()>) {
+) -> (mpsc::Receiver<PollEvent>, PollerHandle) {
     let (tx, rx) = mpsc::channel(4);
-    let handle = tokio::spawn(async move {
+    let refresh = Arc::new(Notify::new());
+    let notified = Arc::clone(&refresh);
+    let task = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            ticker.tick().await;
+            let scheduled = tokio::select! {
+                _ = ticker.tick() => true,
+                () = notified.notified() => false,
+            };
             let event = match client.snapshot().await {
-                Ok(s) => PollEvent::Snapshot(s),
-                Err(e) => PollEvent::Error(e.to_string()),
+                Ok(s) if scheduled => PollEvent::Snapshot(s),
+                Ok(s) => PollEvent::Refresh(s),
+                Err(e) if scheduled => PollEvent::Error(e.to_string()),
+                // The next scheduled poll reports the failure; don't skew the graph twice.
+                Err(_) => continue,
             };
             if tx.send(event).await.is_err() {
                 break;
             }
         }
     });
-    (rx, handle)
+    (rx, PollerHandle { refresh, task })
 }
 
 #[cfg(test)]
@@ -325,5 +372,15 @@ mod tests {
         );
         state.handle(PollEvent::Snapshot(snapshot()));
         assert!(state.error.is_none());
+    }
+
+    #[test]
+    fn refresh_updates_list_but_not_history() {
+        let mut state = AppState::default();
+        state.handle(PollEvent::Snapshot(snapshot()));
+        state.handle(PollEvent::Refresh(Snapshot::default()));
+        assert_eq!(state.history.len(), 1);
+        assert_eq!(state.counts().total(), 0);
+        assert!(state.loaded);
     }
 }

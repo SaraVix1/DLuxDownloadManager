@@ -1,10 +1,14 @@
 //! The interactive terminal UI (the default `dlux` command).
 
+mod actions;
 mod app;
+mod input;
+mod overlay;
 mod terminal;
 mod theme;
 mod ui;
 
+use actions::Executor;
 use anyhow::{Context, Result, bail};
 use app::{App, ConnectionInfo};
 use crossterm::event::EventStream;
@@ -13,6 +17,7 @@ use dlux_core::aria2::{Aria2, Origin};
 use dlux_core::state::{POLL_INTERVAL, spawn_poller};
 use futures_util::StreamExt;
 use theme::Theme;
+use tokio::sync::mpsc;
 
 /// Run the TUI until the user quits.
 pub async fn run(aria2: &Aria2, cfg: &Config) -> Result<()> {
@@ -32,6 +37,12 @@ pub async fn run(aria2: &Aria2, cfg: &Config) -> Result<()> {
     };
     let mut app = App::new(Theme::for_terminal(&cfg.ui.theme), info);
     let (mut polls, poller) = spawn_poller(aria2.client().clone(), POLL_INTERVAL);
+    let (outcome_tx, mut outcomes) = mpsc::unbounded_channel();
+    let executor = Executor {
+        client: aria2.client().clone(),
+        refresh: poller.refresher(),
+        outcomes: outcome_tx,
+    };
 
     let mut guard = terminal::init().context("cannot initialise the terminal")?;
     let mut events = EventStream::new();
@@ -45,6 +56,7 @@ pub async fn run(aria2: &Aria2, cfg: &Config) -> Result<()> {
                     Some(event) => app.state.handle(event),
                     None => bail!("the aria2 poller stopped unexpectedly"),
                 },
+                Some(outcome) = outcomes.recv() => app.notify(outcome.text, outcome.error),
                 event = events.next() => match event {
                     Some(Ok(event)) => app.on_event(event),
                     Some(Err(e)) => return Err(e).context("reading terminal input"),
@@ -55,12 +67,15 @@ pub async fn run(aria2: &Aria2, cfg: &Config) -> Result<()> {
             if app.should_quit {
                 break;
             }
+            for action in app.take_actions() {
+                executor.run(action, guard.terminal.backend_mut());
+            }
         }
         Ok(())
     }
     .await;
 
-    poller.abort();
+    drop(poller);
     drop(guard);
     result
 }

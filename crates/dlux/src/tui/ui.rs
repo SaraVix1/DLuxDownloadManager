@@ -1,7 +1,8 @@
 //! Rendering. Everything is drawn from [`App`]; clickable regions are recorded in
 //! [`App::hits`] for mouse handling.
 
-use super::app::{App, Button, HitMap};
+use super::app::{App, Command, HitMap};
+use super::overlay;
 use super::theme::Theme;
 use dlux_core::fmt;
 use dlux_core::rpc::{Download, DownloadStatus};
@@ -97,6 +98,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         .render(area, buf);
 
     let layout = compute_layout(area, app.details);
+    app.hits.wide = area.width >= WIDE;
     render_header(buf, app, layout.header);
     if let Some(r) = layout.graph {
         render_graph(buf, app, r);
@@ -110,6 +112,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if let Some(r) = layout.hints {
         render_hints(buf, app, r);
     }
+    overlay::render(buf, app);
+}
+
+/// Whether the mouse is over `rect`.
+fn hovered(app: &App, rect: Rect) -> bool {
+    app.hover.is_some_and(|p| rect.contains(p))
 }
 
 // ----- helpers ------------------------------------------------------------------------------
@@ -480,8 +488,13 @@ fn render_tabs(buf: &mut Buffer, app: &mut App, area: Rect) {
     for filter in Filter::ALL {
         let n = counts.get(filter);
         let selected = filter == app.filter;
+        let label_w = (filter.label().width() + n.to_string().width() + 3) as u16;
+        let rect = Rect::new(x, area.y, label_w, 1);
+        let hover = !selected && hovered(app, rect);
         let spans: Vec<Span> = if selected {
             pill(format!("{} {n}", filter.label()), t.blue, t.bg_dark)
+        } else if hover {
+            pill(format!("{} {n}", filter.label()), t.bg_highlight, t.fg)
         } else {
             let count_color = if filter == Filter::Errors && n > 0 {
                 t.red
@@ -573,7 +586,8 @@ fn render_list(buf: &mut Buffer, app: &mut App, area: Rect) {
         let y = inner.y + slot as u16 * row;
         let rect = Rect::new(inner.x, y, inner.width, CARD_HEIGHT).intersection(inner);
         let is_selected = selected.as_deref() == Some(d.gid.as_str());
-        render_card(buf, rect, d, is_selected, &t);
+        let hover = !is_selected && hovered(app, rect);
+        render_card(buf, rect, d, is_selected, hover, &t);
         cards.push((rect, d.gid.clone()));
     }
     app.hits.cards = cards;
@@ -593,15 +607,22 @@ fn render_list(buf: &mut Buffer, app: &mut App, area: Rect) {
             .begin_symbol(None)
             .end_symbol(None)
             .track_style(Style::new().fg(t.border))
-            .thumb_style(Style::new().fg(t.blue))
+            .thumb_style(Style::new().fg(if app.dragging || hovered(app, track) {
+                t.cyan
+            } else {
+                t.blue
+            }))
             .render(track, buf, &mut state);
         app.hits.scrollbar = Some(track);
     }
 }
 
-fn render_card(buf: &mut Buffer, area: Rect, d: &Download, selected: bool, t: &Theme) {
+fn render_card(buf: &mut Buffer, area: Rect, d: &Download, selected: bool, hover: bool, t: &Theme) {
     if area.is_empty() {
         return;
+    }
+    if hover {
+        buf.set_style(area, Style::new().bg(t.bg_hover));
     }
     if selected {
         buf.set_style(area, Style::new().bg(t.bg_highlight));
@@ -828,39 +849,53 @@ fn render_details(buf: &mut Buffer, app: &App, area: Rect) {
 
 // ----- toolbar & hints ----------------------------------------------------------------------
 
-/// Whether a toolbar button applies to the current selection.
-pub fn button_enabled(button: Button, selected: Option<&Download>) -> bool {
-    match button {
-        Button::Add => true,
-        Button::Pause => selected
-            .is_some_and(|d| matches!(d.status, DownloadStatus::Active | DownloadStatus::Waiting)),
-        Button::Resume => selected.is_some_and(|d| d.status == DownloadStatus::Paused),
-        Button::Remove => selected.is_some(),
-    }
-}
-
 fn render_toolbar(buf: &mut Buffer, app: &mut App, area: Rect) {
     let t = app.theme;
     let selected = app.selected_download().cloned();
     let mut x = area.x + 1;
-    for button in Button::ALL {
-        let enabled = button_enabled(button, selected.as_ref());
-        let (bg, fg) = match (button, enabled) {
-            (Button::Add, _) => (t.blue, t.bg_dark),
-            (_, true) => (t.bg_highlight, t.fg),
-            (_, false) => (t.bg_highlight, t.comment),
+    for cmd in Command::TOOLBAR {
+        let enabled = cmd.enabled(selected.as_ref());
+        let w = cmd.label().width() as u16 + 4;
+        let rect = Rect::new(x, area.y, w, 1);
+        let hover = enabled && hovered(app, rect);
+        let (bg, fg) = match (cmd, enabled, hover) {
+            (Command::Add, _, false) => (t.blue, t.bg_dark),
+            (Command::Add, _, true) => (t.cyan, t.bg_dark),
+            (_, true, false) => (t.bg_highlight, t.fg),
+            (_, true, true) => (t.border, t.fg),
+            (_, false, _) => (t.bg_highlight, t.comment),
         };
-        let spans = pill(format!(" {} ", button.label()), bg, fg);
-        let w = spans_width(&spans);
+        let spans = pill(format!(" {} ", cmd.label()), bg, fg);
         if x + w > area.right() {
             break;
         }
         put_line(buf, x, area.y, spans, w);
-        app.hits.buttons.push((Rect::new(x, area.y, w, 1), button));
+        app.hits.buttons.push((rect, cmd));
         x += w + 1;
     }
+    let room = usize::from(area.right().saturating_sub(x + 2));
+    if let Some(toast) = app.current_toast(std::time::Instant::now()) {
+        let (icon, color) = if toast.error {
+            ("✗ ", t.red)
+        } else {
+            ("✓ ", t.green)
+        };
+        let text = truncate(&toast.text, room.saturating_sub(icon.width() + 1));
+        if room > 8 {
+            put_right(
+                buf,
+                area,
+                area.y,
+                vec![
+                    Span::styled(icon, Style::new().fg(color)),
+                    Span::styled(format!("{text} "), Style::new().fg(color)),
+                ],
+            );
+        }
+        return;
+    }
     let version = format!("dlux {} ", env!("CARGO_PKG_VERSION"));
-    if x + version.width() as u16 + 2 <= area.right() {
+    if version.width() <= room {
         put_right(
             buf,
             area,
@@ -870,35 +905,45 @@ fn render_toolbar(buf: &mut Buffer, app: &mut App, area: Rect) {
     }
 }
 
-const HINTS: &[(&str, &str)] = &[
-    ("j/k", "move"),
-    ("tab", "filter"),
-    ("enter", "details"),
-    ("a", "add"),
-    ("p", "pause"),
-    ("r", "resume"),
-    ("d", "remove"),
-    ("?", "help"),
-    ("q", "quit"),
+/// Key hints; the ones with a command are clickable.
+const HINTS: &[(&str, &str, Option<Command>)] = &[
+    ("j/k", "move", None),
+    ("tab", "filter", None),
+    ("enter", "details", Some(Command::Details)),
+    ("a", "add", Some(Command::Add)),
+    ("p", "pause", Some(Command::Pause)),
+    ("r", "resume", Some(Command::Resume)),
+    ("d", "remove", Some(Command::Remove)),
+    ("m", "menu", Some(Command::Menu)),
+    ("?", "help", Some(Command::Help)),
+    ("q", "quit", Some(Command::Quit)),
 ];
 
-fn render_hints(buf: &mut Buffer, app: &App, area: Rect) {
-    let t = &app.theme;
-    let mut spans = vec![Span::raw(" ")];
-    let mut used = 1u16;
-    for (key, desc) in HINTS {
-        let item = [
-            Span::styled(*key, Style::new().fg(t.blue).add_modifier(Modifier::BOLD)),
-            Span::styled(format!(" {desc}  "), Style::new().fg(t.comment)),
-        ];
-        let w = spans_width(&item);
-        if used + w > area.width {
+fn render_hints(buf: &mut Buffer, app: &mut App, area: Rect) {
+    let t = app.theme;
+    let mut x = area.x + 1;
+    for (key, desc, cmd) in HINTS {
+        let w = (key.width() + desc.width() + 1) as u16;
+        if x + w > area.right() {
             break;
         }
-        used += w;
-        spans.extend(item);
+        let rect = Rect::new(x, area.y, w, 1);
+        let hover = cmd.is_some() && hovered(app, rect);
+        let desc_style = if hover {
+            Style::new().fg(t.fg).add_modifier(Modifier::UNDERLINED)
+        } else {
+            Style::new().fg(t.comment)
+        };
+        let item = vec![
+            Span::styled(*key, Style::new().fg(t.blue).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" {desc}"), desc_style),
+        ];
+        put_line(buf, x, area.y, item, w);
+        if let Some(cmd) = cmd {
+            app.hits.hints.push((rect, *cmd));
+        }
+        x += w + 2;
     }
-    put_line(buf, area.x, area.y, spans, area.width);
 }
 
 #[cfg(test)]
@@ -1028,6 +1073,7 @@ mod tests {
         assert_eq!(app.hits.tabs.len(), 4);
         assert_eq!(app.hits.cards.len(), 2);
         assert_eq!(app.hits.buttons.len(), 4);
+        assert!(app.hits.hints.len() >= 6, "hints are clickable");
     }
 
     #[test]
