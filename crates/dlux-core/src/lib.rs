@@ -7,6 +7,7 @@
 //! - [`config`] — `~/.config/dlux/config.toml`
 //! - [`paths`] — standard file locations and binary lookup
 //! - [`fmt`] — human-readable sizes, speeds and durations
+//! - [`state`] — app state shared by the front ends: snapshot, filters, speed history, poller
 
 pub mod aria2;
 pub mod config;
@@ -14,6 +15,7 @@ pub mod fmt;
 mod fsutil;
 pub mod paths;
 pub mod rpc;
+pub mod state;
 
 pub use aria2::{Aria2, Aria2Error, ConnectOptions, Origin};
 pub use config::Config;

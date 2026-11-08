@@ -10,7 +10,7 @@ fully mouse-driven terminal UI and a web UI.
 
 ## Try it
 
-Requires Rust 1.85+ and `aria2c` on your `PATH`.
+Requires Rust 1.88+ and `aria2c` on your `PATH`.
 
 ```sh
 cargo run -- status            # connect to aria2 (or start one) and list downloads

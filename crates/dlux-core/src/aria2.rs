@@ -152,21 +152,22 @@ impl Aria2 {
         matches!(self.origin, Origin::Spawned { .. })
     }
 
-    /// Stop the spawned aria2 (if any): graceful `aria2.shutdown` so the session is saved, then
-    /// a kill if it does not exit in time. A no-op for an external aria2.
+    /// Stop the spawned aria2 (if any) gracefully so the session is saved (SIGTERM on Unix,
+    /// `aria2.shutdown` elsewhere), then kill it if it does not exit in time. A no-op for an
+    /// external aria2.
     pub async fn shutdown(mut self) {
         let Some(mut child) = self.child.take() else {
             return;
         };
-        if let Err(e) = tokio::time::timeout(Duration::from_secs(2), self.client.shutdown())
-            .await
-            .unwrap_or_else(|_| {
-                Err(rpc::Error::Decode(
-                    "timed out sending aria2.shutdown".into(),
-                ))
-            })
-        {
-            tracing::debug!("graceful aria2 shutdown failed: {e}");
+        // On Unix, SIGTERM makes aria2 save its session and exit in about a second, whereas the
+        // `aria2.shutdown` RPC always lingers for ~4 s before the process exits.
+        if !request_terminate(&child) {
+            let graceful = tokio::time::timeout(Duration::from_secs(2), self.client.shutdown());
+            match graceful.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::debug!("graceful aria2 shutdown failed: {e}"),
+                Err(_) => tracing::debug!("timed out sending aria2.shutdown"),
+            }
         }
         match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
             Ok(Ok(status)) => tracing::debug!("aria2c exited with {status}"),
@@ -177,6 +178,23 @@ impl Aria2 {
             }
         }
     }
+}
+
+/// Ask the child to terminate gracefully with SIGTERM. Returns `false` if that is not possible
+/// (non-Unix platform, or the process already exited), in which case the RPC is used instead.
+#[cfg(unix)]
+fn request_terminate(child: &Child) -> bool {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+    let Some(pid) = child.id().and_then(|id| i32::try_from(id).ok()) else {
+        return false;
+    };
+    kill(Pid::from_raw(pid), Signal::SIGTERM).is_ok()
+}
+
+#[cfg(not(unix))]
+fn request_terminate(_child: &Child) -> bool {
+    false
 }
 
 /// Connect to aria2, spawning a private `aria2c` if needed and allowed.
