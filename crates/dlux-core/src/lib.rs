@@ -1,0 +1,20 @@
+//! Core library for **dlux** — *Download everything. Beautifully.*
+//!
+//! Front-end independent pieces shared by the dlux TUI and web UI:
+//!
+//! - [`rpc`] — async aria2 JSON-RPC client and typed results
+//! - [`aria2`] — connect to a running aria2, or spawn and manage a private `aria2c`
+//! - [`config`] — `~/.config/dlux/config.toml`
+//! - [`paths`] — standard file locations and binary lookup
+//! - [`fmt`] — human-readable sizes, speeds and durations
+
+pub mod aria2;
+pub mod config;
+pub mod fmt;
+mod fsutil;
+pub mod paths;
+pub mod rpc;
+
+pub use aria2::{Aria2, Aria2Error, ConnectOptions, Origin};
+pub use config::Config;
+pub use rpc::Client;
