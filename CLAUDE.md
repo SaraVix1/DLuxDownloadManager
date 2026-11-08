@@ -106,7 +106,7 @@ details. Keyboard too: j/k, a, p, r, d, tab, ?, q.
 
 1. [x] CLAUDE.md, workspace skeleton, aria2 RPC client, aria2 auto-spawn
 2. [x] TUI layout, theme, live list, speed graph
-3. [ ] Complete mouse support and keyboard shortcuts
+3. [x] Complete mouse support and keyboard shortcuts
 4. [ ] Add dialog (URLs, magnets, torrents) and download controls
 5. [ ] yt-dlp and ffmpeg integration with the format picker
 6. [ ] Web backend (REST + WebSocket)
@@ -129,3 +129,16 @@ details. Keyboard too: j/k, a, p, r, d, tab, ?, q.
   tab/shift-tab/1-4, j/k/arrows/PgUp/PgDn/g/G, Enter. Mouse capture is on and `App::hits` records
   tab/card/button/scrollbar rects for M3. TUI logs go to `~/.local/share/dlux/dlux.log`.
   Screenshots in `docs/screenshots/`.
+- **M3** (branch `feat/m3-mouse-keyboard`): every input resolves to a `tui::app::Command`
+  (keys, toolbar, context menu, clickable hints), run against the selection; side effects are
+  queued as `Action`s and performed by `tui::actions::Executor` on background tasks (aria2 calls,
+  `xdg-open`/`open`/`explorer`, clipboard via OSC 52 + wl-copy/xclip/xsel/pbcopy/clip), with
+  results shown as a toolbar toast. `tui::input` routes events dialog → menu → main screen.
+  Mouse: click tabs/cards/buttons/hints, double-click (450 ms) opens details, right-click context
+  menu (Pause, Resume, Remove, Open folder, Copy URL), wheel scrolls the list (or switches tabs
+  over the tab row), draggable scrollbar, hover highlights (`Theme::bg_hover`). Wheel/drag scroll
+  the view without moving the selection (`App::follow`). Keys added: a, p/r/space, d/Del, o, c,
+  m/Menu/Shift-F10, ?/F1; Esc closes popups first. Remove asks for confirmation unless the
+  download already stopped (then `removeDownloadResult`). Core: `spawn_poller` now returns a
+  `PollerHandle` with `refresh()`; out-of-schedule polls arrive as `PollEvent::Refresh` and do not
+  add speed samples. `a` shows a "coming next milestone" toast until M4.
