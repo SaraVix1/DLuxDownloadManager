@@ -16,7 +16,25 @@ impl App {
         match event {
             Event::Key(key) => self.on_key(key),
             Event::Mouse(mouse) => self.on_mouse(mouse, Instant::now()),
+            Event::Paste(text) => self.on_paste(&text),
             _ => {}
+        }
+    }
+
+    /// Bracketed paste (also what most terminals send for a dropped file): into the focused
+    /// form field, or — on the main screen — straight into a new Add dialog.
+    pub fn on_paste(&mut self, text: &str) {
+        match self.dialog.as_mut() {
+            None => self.open_add(text),
+            Some(dialog) => {
+                if let Some(form) = dialog.form() {
+                    let focus = *form.focus();
+                    if let Some(field) = form.text_field(focus) {
+                        field.insert_str(text);
+                        *form.error() = None;
+                    }
+                }
+            }
         }
     }
 
@@ -38,6 +56,9 @@ impl App {
     }
 
     fn dialog_key(&mut self, key: KeyEvent) {
+        if self.dialog.as_mut().is_some_and(|d| d.form().is_some()) {
+            return self.form_key(key);
+        }
         let confirm = matches!(self.dialog, Some(Dialog::ConfirmRemove { .. }));
         let button = match key.code {
             KeyCode::Char('y') | KeyCode::Enter if confirm => DialogButton::Confirm,
@@ -47,6 +68,34 @@ impl App {
             _ => return,
         };
         self.press_dialog(button);
+    }
+
+    fn form_key(&mut self, key: KeyEvent) {
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        match key.code {
+            KeyCode::Esc => return self.press_dialog(DialogButton::Cancel),
+            KeyCode::Enter if !alt => return self.press_dialog(DialogButton::Confirm),
+            _ => {}
+        }
+        let Some(form) = self.dialog.as_mut().and_then(Dialog::form) else {
+            return;
+        };
+        let focus = *form.focus();
+        match key.code {
+            KeyCode::Tab => form.cycle(1),
+            KeyCode::BackTab => form.cycle(-1),
+            KeyCode::Char(' ') if form.toggle(focus) => {}
+            _ => {
+                let used = form.text_field(focus).is_some_and(|f| f.on_key(key));
+                if used {
+                    *form.error() = None;
+                } else if key.code == KeyCode::Down {
+                    form.cycle(1);
+                } else if key.code == KeyCode::Up {
+                    form.cycle(-1);
+                }
+            }
+        }
     }
 
     fn menu_key(&mut self, key: KeyEvent) {
@@ -86,6 +135,11 @@ impl App {
             KeyCode::Char('p') | KeyCode::Char(' ') => Command::Pause,
             KeyCode::Char('r') => Command::Resume,
             KeyCode::Char('d') | KeyCode::Delete => Command::Remove,
+            KeyCode::Char('P') => Command::PauseAll,
+            KeyCode::Char('R') => Command::ResumeAll,
+            KeyCode::Char('X') => Command::Purge,
+            KeyCode::Char('s') => Command::SpeedLimit,
+            KeyCode::Char('S') => Command::GlobalLimit,
             KeyCode::Char('o') => Command::OpenFolder,
             KeyCode::Char('c') => Command::CopyUrl,
             KeyCode::Char('m') | KeyCode::Menu => Command::Menu,
@@ -151,11 +205,22 @@ impl App {
     }
 
     fn left_click(&mut self, pos: Position, now: Instant) {
-        if self.dialog.is_some() {
+        if let Some(dialog) = self.dialog.as_mut() {
+            let inside = self.hits.dialog.is_some_and(|r| r.contains(pos));
             if let Some(button) = self.hits.dialog_button_at(pos) {
                 self.press_dialog(button);
-            } else if !self.hits.dialog.is_some_and(|r| r.contains(pos)) {
-                // A click outside a dialog dismisses it.
+            } else if let (Some(form), Some((field, text_area))) =
+                (dialog.form(), self.hits.field_at(pos))
+            {
+                *form.focus() = field;
+                if !form.toggle(field)
+                    && let Some(f) = form.text_field(field)
+                {
+                    f.click(text_area, pos);
+                }
+            } else if !inside && dialog.form().is_none() {
+                // A click outside dismisses Help or a confirmation, but never a form (that
+                // would throw away what was typed).
                 self.press_dialog(DialogButton::Cancel);
             }
             return;
@@ -171,6 +236,8 @@ impl App {
         }
         if let Some(filter) = self.hits.tab_at(pos) {
             self.set_filter(filter);
+        } else if self.hits.speed.is_some_and(|r| r.contains(pos)) {
+            self.run(Command::GlobalLimit);
         } else if let Some(gid) = self.hits.card_at(pos).cloned() {
             let double = self
                 .last_click
@@ -399,19 +466,19 @@ mod tests {
         assert_eq!(menu.anchor, Position::new(30, 18));
 
         // Fake the rendered menu and click "Open folder".
-        app.hits.menu = Some(Rect::new(30, 18, 20, 7));
+        app.hits.menu = Some(Rect::new(30, 18, 20, 8));
         app.hits.menu_items = Command::MENU
             .iter()
             .enumerate()
             .map(|(i, c)| (Rect::new(31, 19 + i as u16, 18, 1), *c))
             .collect();
-        app.on_mouse(mouse(MouseEventKind::Moved, 35, 22), Instant::now());
+        app.on_mouse(mouse(MouseEventKind::Moved, 35, 23), Instant::now());
         assert_eq!(
             app.menu.as_ref().unwrap().cursor,
-            3,
+            4,
             "hover moves the cursor"
         );
-        click(&mut app, 35, 22, Instant::now());
+        click(&mut app, 35, 23, Instant::now());
         assert!(app.menu.is_none());
         assert_eq!(
             app.take_actions(),
@@ -505,5 +572,134 @@ mod tests {
             Instant::now(),
         );
         assert_eq!(app.offset, 17, "no drag after release");
+    }
+
+    fn typed(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+    }
+
+    #[test]
+    fn paste_opens_add_dialog_and_enter_adds() {
+        let mut app = app_with(&["a"]);
+        app.default_dir = "/dl".into();
+        app.on_event(Event::Paste("https://example.com/x.iso\r\n".into()));
+        let Some(Dialog::Add(form)) = &app.dialog else {
+            panic!("paste should open the Add dialog");
+        };
+        assert_eq!(form.urls.text(), "https://example.com/x.iso");
+        // Keys go to the form, not the main screen.
+        app.on_key(key(KeyCode::Char('q')));
+        assert!(!app.should_quit);
+        app.on_key(key(KeyCode::Backspace));
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.dialog.is_none());
+        match app.take_actions().as_slice() {
+            [Action::Add { sources, options }] => {
+                assert_eq!(sources.len(), 1);
+                assert_eq!(options.dir.as_deref(), Some("/dl"));
+            }
+            other => panic!("unexpected actions {other:?}"),
+        }
+        assert_eq!(app.filter, Filter::Active);
+    }
+
+    #[test]
+    fn add_form_keeps_errors_and_fields() {
+        let mut app = app_with(&[]);
+        app.on_key(key(KeyCode::Char('a')));
+        app.on_key(key(KeyCode::Enter));
+        let error = |app: &mut App| match &app.dialog {
+            Some(Dialog::Add(f)) => f.error.clone(),
+            _ => panic!("dialog closed"),
+        };
+        assert!(
+            error(&mut app).is_some(),
+            "empty form is rejected but stays open"
+        );
+        typed(&mut app, "not-a-url");
+        assert!(error(&mut app).is_none(), "typing clears the error");
+        app.on_key(key(KeyCode::Enter));
+        assert!(error(&mut app).unwrap().contains("not-a-url"));
+
+        // Tab to the checkbox, toggle it with space, tab around to the URLs again.
+        app.on_key(key(KeyCode::Tab));
+        app.on_key(key(KeyCode::Tab));
+        app.on_key(key(KeyCode::Char(' ')));
+        app.on_key(key(KeyCode::Tab));
+        let Some(Dialog::Add(form)) = &app.dialog else {
+            panic!()
+        };
+        assert!(form.paused);
+        assert_eq!(form.focus, crate::tui::forms::Field::Urls);
+
+        // A click outside a form does not throw it away; Esc does.
+        app.hits.dialog = Some(Rect::new(10, 5, 40, 10));
+        click(&mut app, 0, 0, Instant::now());
+        assert!(app.dialog.is_some());
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.dialog.is_none());
+        assert!(!app.should_quit);
+        assert!(app.take_actions().is_empty());
+    }
+
+    #[test]
+    fn global_controls() {
+        let mut app = app_with(&["a"]);
+        app.on_key(key(KeyCode::Char('P')));
+        app.on_key(key(KeyCode::Char('R'))); // w1 is paused
+        app.on_key(key(KeyCode::Char('X'))); // e1 has stopped
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::PauseAll, Action::ResumeAll, Action::Purge]
+        );
+        let mut empty = app_with(&[]);
+        empty.state.apply(dlux_core::rpc::Snapshot::default());
+        empty.on_key(key(KeyCode::Char('P')));
+        empty.on_key(key(KeyCode::Char('X')));
+        assert!(empty.take_actions().is_empty(), "nothing to pause or clear");
+    }
+
+    #[test]
+    fn speed_limit_dialog_round_trip() {
+        use crate::tui::actions::Feedback;
+        use dlux_core::limits::{Limits, Target};
+        let mut app = app_with(&["a"]);
+        app.on_key(key(KeyCode::Char('s')));
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::LoadLimits(Target::Download("a".into()))]
+        );
+        // Values from aria2 fill the form…
+        app.on_feedback(Feedback::Limits(
+            Target::Download("a".into()),
+            Limits {
+                download: 1 << 20,
+                upload: 0,
+            },
+        ));
+        // …and the user edits the download limit.
+        app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        typed(&mut app, "500K");
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::SetLimits(
+                Target::Download("a".into()),
+                Limits {
+                    download: 500 * 1024,
+                    upload: 0
+                }
+            )]
+        );
+        assert!(app.dialog.is_none());
+
+        // The global limit from the header pill.
+        app.hits.speed = Some(Rect::new(60, 1, 20, 1));
+        click(&mut app, 65, 1, Instant::now());
+        assert!(matches!(&app.dialog, Some(Dialog::Limits(f)) if f.target == Target::Global));
+        app.on_feedback(Feedback::Limits(Target::Global, Limits::default()));
+        assert_eq!(app.global_limits, Some(Limits::default()));
     }
 }

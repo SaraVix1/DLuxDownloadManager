@@ -2,6 +2,7 @@
 //! regions are recorded in [`App::hits`] like the rest of the UI.
 
 use super::app::{App, Command, Dialog, DialogButton};
+use super::forms;
 use super::theme::Theme;
 use super::ui::truncate;
 use ratatui::buffer::Buffer;
@@ -11,21 +12,21 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Widget};
 use unicode_width::UnicodeWidthStr;
 
-/// Keyboard shortcuts listed in the help dialog.
+/// Keyboard shortcuts listed in the help dialog (sized to fit an 80×24 terminal).
 const HELP_KEYS: &[(&str, &str)] = &[
-    ("j/k  ↓/↑", "move selection"),
+    ("j/k  ↑/↓  PgUp/Dn", "move selection"),
     ("g/G  Home/End", "first / last"),
-    ("PgUp/PgDn", "page up / down"),
     ("tab  1-4", "switch filter tab"),
     ("enter", "toggle details"),
-    ("a", "add download"),
+    ("a", "add downloads (or just paste a URL)"),
     ("p  r  space", "pause / resume / toggle"),
+    ("P  R", "pause all / resume all"),
     ("d  Del", "remove"),
-    ("o", "open folder"),
-    ("c", "copy URL"),
+    ("X", "clear finished"),
+    ("s  S", "speed limit / global speed limit"),
+    ("o  c", "open folder / copy URL"),
     ("m", "context menu"),
-    ("?", "this help"),
-    ("q  Esc", "quit (Esc closes popups)"),
+    ("?  q  Esc", "help / quit (Esc closes popups)"),
 ];
 
 /// Mouse actions listed in the help dialog.
@@ -33,8 +34,8 @@ const HELP_MOUSE: &[(&str, &str)] = &[
     ("click", "select card, tab or button"),
     ("double-click", "open details"),
     ("right-click", "context menu"),
-    ("wheel", "scroll list / switch tabs"),
-    ("drag scrollbar", "scroll"),
+    ("wheel  scrollbar", "scroll (wheel on tabs: switch)"),
+    ("click ↓/↑ speeds", "global speed limit"),
 ];
 
 pub fn render(buf: &mut Buffer, app: &mut App) {
@@ -58,7 +59,7 @@ pub fn fit(anchor: Position, w: u16, h: u16, screen: Rect) -> Rect {
     Rect::new(x, y, w, h)
 }
 
-fn centered(w: u16, h: u16, screen: Rect) -> Rect {
+pub fn centered(w: u16, h: u16, screen: Rect) -> Rect {
     let w = w.min(screen.width);
     let h = h.min(screen.height);
     Rect::new(
@@ -69,7 +70,7 @@ fn centered(w: u16, h: u16, screen: Rect) -> Rect {
     )
 }
 
-fn popup_block<'a>(t: &Theme, title: &'a str) -> Block<'a> {
+pub fn popup_block<'a>(t: &Theme, title: &'a str) -> Block<'a> {
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(t.border_focus))
@@ -142,26 +143,39 @@ fn render_menu(buf: &mut Buffer, app: &mut App) {
     }
 }
 
-/// A clickable dialog button: `[ label ]`, highlighted when hovered.
-fn button(
+/// How a dialog button is coloured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    /// The main action (Add, Apply).
+    Primary,
+    /// A destructive main action (Remove).
+    Danger,
+    Normal,
+}
+
+/// A clickable dialog button: ` label ` on a coloured background, highlighted when hovered.
+/// Returns its width.
+pub fn dialog_button(
     buf: &mut Buffer,
     app: &mut App,
     x: u16,
     y: u16,
     label: &str,
     kind: DialogButton,
-    primary: bool,
+    tone: Tone,
 ) -> u16 {
     let t = app.theme;
     let text = format!(" {label} ");
     let w = text.width() as u16;
     let rect = Rect::new(x, y, w, 1).intersection(buf.area);
     let hovered = app.hover.is_some_and(|p| rect.contains(p));
-    let (bg, fg) = match (primary, hovered) {
-        (true, false) => (t.red, t.bg_dark),
-        (true, true) => (t.orange, t.bg_dark),
-        (false, false) => (t.bg_highlight, t.fg),
-        (false, true) => (t.border, t.fg),
+    let (bg, fg) = match (tone, hovered) {
+        (Tone::Danger, false) => (t.red, t.bg_dark),
+        (Tone::Danger, true) => (t.orange, t.bg_dark),
+        (Tone::Primary, false) => (t.blue, t.bg_dark),
+        (Tone::Primary, true) => (t.cyan, t.bg_dark),
+        (Tone::Normal, false) => (t.bg_highlight, t.fg),
+        (Tone::Normal, true) => (t.border, t.fg),
     };
     buf.set_line(
         rect.x,
@@ -183,6 +197,16 @@ fn render_dialog(buf: &mut Buffer, app: &mut App) {
     let screen = buf.area;
     let t = app.theme;
     match dialog {
+        Dialog::Add(_) | Dialog::Limits(_) => {
+            // Forms keep scroll state, so render the real one (not a copy).
+            let mut dialog = app.dialog.take();
+            match dialog.as_mut() {
+                Some(Dialog::Add(form)) => forms::render_add(buf, app, form),
+                Some(Dialog::Limits(form)) => forms::render_limits(buf, app, form),
+                _ => {}
+            }
+            app.dialog = dialog;
+        }
         Dialog::ConfirmRemove { name, .. } => {
             let area = centered(56, 8, screen);
             if area.width < 20 || area.height < 6 {
@@ -219,8 +243,16 @@ fn render_dialog(buf: &mut Buffer, app: &mut App) {
             let y = inner.bottom().saturating_sub(1);
             let total = " Remove ".width() as u16 + 1 + " Cancel ".width() as u16;
             let mut x = body.right().saturating_sub(total);
-            x += button(buf, app, x, y, "Remove", DialogButton::Confirm, true) + 1;
-            button(buf, app, x, y, "Cancel", DialogButton::Cancel, false);
+            x += dialog_button(
+                buf,
+                app,
+                x,
+                y,
+                "Remove",
+                DialogButton::Confirm,
+                Tone::Danger,
+            ) + 1;
+            dialog_button(buf, app, x, y, "Cancel", DialogButton::Cancel, Tone::Normal);
         }
         Dialog::Help => {
             let rows = HELP_KEYS.len() + HELP_MOUSE.len() + 6;
@@ -233,7 +265,7 @@ fn render_dialog(buf: &mut Buffer, app: &mut App) {
             let inner = block.inner(area);
             block.render(area, buf);
             app.hits.dialog = Some(area);
-            let key_w = 16;
+            let key_w = 18;
             let item = |k: &str, d: &str| {
                 Line::from(vec![
                     Span::styled(
@@ -261,7 +293,7 @@ fn render_dialog(buf: &mut Buffer, app: &mut App) {
             Paragraph::new(lines).render(text, buf);
             let y = inner.bottom().saturating_sub(1);
             let x = inner.right().saturating_sub(" Close ".width() as u16 + 1);
-            button(buf, app, x, y, "Close", DialogButton::Cancel, false);
+            dialog_button(buf, app, x, y, "Close", DialogButton::Cancel, Tone::Normal);
         }
     }
 }

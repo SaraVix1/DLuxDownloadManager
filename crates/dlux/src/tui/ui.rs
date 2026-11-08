@@ -4,9 +4,9 @@
 use super::app::{App, Command, HitMap};
 use super::overlay;
 use super::theme::Theme;
-use dlux_core::fmt;
 use dlux_core::rpc::{Download, DownloadStatus};
 use dlux_core::state::Filter;
+use dlux_core::{fmt, limits};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
@@ -306,8 +306,8 @@ fn logo(t: &Theme) -> Vec<Span<'static>> {
     ]
 }
 
-fn render_header(buf: &mut Buffer, app: &App, area: Rect) {
-    let t = &app.theme;
+fn render_header(buf: &mut Buffer, app: &mut App, area: Rect) {
+    let t = &app.theme.clone();
     let inner = if area.height >= 3 {
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
@@ -326,18 +326,33 @@ fn render_header(buf: &mut Buffer, app: &App, area: Rect) {
         return;
     }
     let stat = app.state.stat();
+    // A set global limit is shown in its pill: "↓ 1.2 MiB/s ≤ 2M".
+    let limit = |l: u64| {
+        if l > 0 {
+            format!(" ≤ {}", limits::format_input(l))
+        } else {
+            String::new()
+        }
+    };
+    let gl = app.global_limits.unwrap_or_default();
+    let down = format!(
+        "↓ {}{}",
+        fmt::speed(stat.download_speed),
+        limit(gl.download)
+    );
+    let up = format!("↑ {}{}", fmt::speed(stat.upload_speed), limit(gl.upload));
+    // Two pills (text + 2 caps each) and a space between them.
+    let pills_w = (down.width() + up.width() + 5) as u16;
+    let speed_rect = Rect::new(inner.right().saturating_sub(pills_w), inner.y, pills_w, 1);
+    let (down_bg, up_bg) = if hovered(app, speed_rect) {
+        (t.teal, t.purple)
+    } else {
+        (t.green, t.magenta)
+    };
     let mut right = Vec::new();
-    right.extend(pill(
-        format!("↓ {}", fmt::speed(stat.download_speed)),
-        t.green,
-        t.bg_dark,
-    ));
+    right.extend(pill(down, down_bg, t.bg_dark));
     right.push(Span::raw(" "));
-    right.extend(pill(
-        format!("↑ {}", fmt::speed(stat.upload_speed)),
-        t.magenta,
-        t.bg_dark,
-    ));
+    right.extend(pill(up, up_bg, t.bg_dark));
 
     let status = if app.state.error.is_some() {
         vec![
@@ -382,6 +397,7 @@ fn render_header(buf: &mut Buffer, app: &App, area: Rect) {
     put_line(buf, inner.x, inner.y, left, inner.width);
     if spans_width(&right_all) < avail {
         put_right(buf, inner, inner.y, right_all);
+        app.hits.speed = Some(speed_rect);
     }
 }
 
@@ -851,10 +867,9 @@ fn render_details(buf: &mut Buffer, app: &App, area: Rect) {
 
 fn render_toolbar(buf: &mut Buffer, app: &mut App, area: Rect) {
     let t = app.theme;
-    let selected = app.selected_download().cloned();
     let mut x = area.x + 1;
     for cmd in Command::TOOLBAR {
-        let enabled = cmd.enabled(selected.as_ref());
+        let enabled = app.can(cmd);
         let w = cmd.label().width() as u16 + 4;
         let rect = Rect::new(x, area.y, w, 1);
         let hover = enabled && hovered(app, rect);
@@ -950,6 +965,7 @@ fn render_hints(buf: &mut Buffer, app: &mut App, area: Rect) {
 mod tests {
     use super::*;
     use crate::tui::app::ConnectionInfo;
+    use dlux_core::limits::Limits;
     use dlux_core::rpc::{BitTorrent, BitTorrentInfo, File, GlobalStat, Snapshot, Uri};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -1072,7 +1088,11 @@ mod tests {
         }
         assert_eq!(app.hits.tabs.len(), 4);
         assert_eq!(app.hits.cards.len(), 2);
-        assert_eq!(app.hits.buttons.len(), 4);
+        assert_eq!(
+            app.hits.buttons.len(),
+            7,
+            "all toolbar buttons fit at 140 columns"
+        );
         assert!(app.hits.hints.len() >= 6, "hints are clickable");
     }
 
@@ -1202,5 +1222,50 @@ mod tests {
         assert_eq!(axis_label(5 * mib), "5 MiB/s");
         assert_eq!(axis_label(1536 * 1024), "1.5 MiB/s");
         assert_eq!(axis_label(0), "0 B/s");
+    }
+
+    #[test]
+    fn renders_add_and_limit_dialogs() {
+        let mut app = sample_app();
+        app.default_dir = "/home/user/Downloads".into();
+        app.open_add("https://example.com/a.iso\nmagnet:?xt=urn:btih:abc");
+        let screen = draw(&mut app, 100, 30);
+        for needle in [
+            "Add downloads",
+            "https://example.com/a.iso",
+            "✓ 1 URL, 1 magnet",
+            "Save to",
+            "/home/user/Downloads",
+            "[ ] Start paused",
+            " Add ",
+            " Cancel ",
+        ] {
+            assert!(screen.contains(needle), "missing {needle:?}:\n{screen}");
+        }
+        assert_eq!(app.hits.fields.len(), 3);
+        assert_eq!(app.hits.dialog_buttons.len(), 2);
+
+        app.dialog = None;
+        app.global_limits = Some(Limits {
+            download: 2 << 20,
+            upload: 0,
+        });
+        app.run(Command::GlobalLimit);
+        let screen = draw(&mut app, 100, 30);
+        for needle in [
+            "Speed limit · all downloads",
+            "2M",
+            "= 2.00 MiB/s",
+            "= unlimited",
+            "≤ 2M",
+        ] {
+            assert!(screen.contains(needle), "missing {needle:?}:\n{screen}");
+        }
+        // Small terminals don't panic with a form open.
+        for (w, h) in [(30, 10), (50, 15), (80, 24)] {
+            draw(&mut app, w, h);
+            app.open_add("x");
+            draw(&mut app, w, h);
+        }
     }
 }

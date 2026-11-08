@@ -107,7 +107,7 @@ details. Keyboard too: j/k, a, p, r, d, tab, ?, q.
 1. [x] CLAUDE.md, workspace skeleton, aria2 RPC client, aria2 auto-spawn
 2. [x] TUI layout, theme, live list, speed graph
 3. [x] Complete mouse support and keyboard shortcuts
-4. [ ] Add dialog (URLs, magnets, torrents) and download controls
+4. [x] Add dialog (URLs, magnets, torrents) and download controls
 5. [ ] yt-dlp and ffmpeg integration with the format picker
 6. [ ] Web backend (REST + WebSocket)
 7. [ ] Web frontend, embedded in the binary
@@ -141,4 +141,16 @@ details. Keyboard too: j/k, a, p, r, d, tab, ?, q.
   m/Menu/Shift-F10, ?/F1; Esc closes popups first. Remove asks for confirmation unless the
   download already stopped (then `removeDownloadResult`). Core: `spawn_poller` now returns a
   `PollerHandle` with `refresh()`; out-of-schedule polls arrive as `PollEvent::Refresh` and do not
-  add speed samples. `a` shows a "coming next milestone" toast until M4.
+  add speed samples.
+- **M4** (branch `feat/m4-add-dialog`): core `sources` (parse free-form input into URL / magnet /
+  .torrent / .metalink sources — one per line, quotes and `file://` from drag-and-drop stripped,
+  friendly reasons for invalid input — and `sources::add`) and core `limits` (parse "500K"/"2M"/
+  "0", read/write global and per-download limits). TUI: `forms` (Add and Speed-limit dialogs,
+  `Form` trait for focus/fields) on a reusable `textfield::TextField` (multi-line, readline keys,
+  paste, click-to-place-cursor). Add dialog: live "✓ 2 URLs, 1 torrent" preview, Save-to dir
+  (defaults to `downloads.dir`), Start paused; Enter adds, Alt+Enter newline; invalid input keeps
+  the form open with the reason. Bracketed paste is on: pasting/dropping on the main screen opens
+  the Add dialog pre-filled. Toolbar gains Pause all / Resume all / Clear finished (P / R / X);
+  `s` per-download limit (also in the context menu), `S` or clicking the header ↓/↑ pills for the
+  global limit, shown in the pills as "≤ 2M". Clicking outside a form never discards it. Executor
+  messages are `actions::Feedback` (toast or limits).
