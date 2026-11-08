@@ -4,8 +4,12 @@
 //! Input handling lives in [`super::input`]; this module holds the state it operates on and the
 //! [`Command`]s that keys, toolbar buttons, menu items and hints all map to.
 
+use super::actions::Feedback;
+use super::forms::{AddForm, Field, Form, LimitsForm};
 use super::theme::Theme;
+use dlux_core::limits::{Limits, Target};
 use dlux_core::rpc::{Download, DownloadStatus, Gid};
+use dlux_core::sources::{AddOptions, Source};
 use dlux_core::state::{AppState, Filter};
 use ratatui::layout::{Position, Rect};
 use std::time::{Duration, Instant};
@@ -34,6 +38,10 @@ pub struct HitMap {
     pub menu_items: Vec<(Rect, Command)>,
     pub dialog: Option<Rect>,
     pub dialog_buttons: Vec<(Rect, DialogButton)>,
+    /// Form controls: clickable area, the field, and where its text is drawn.
+    pub fields: Vec<(Rect, Field, Rect)>,
+    /// The ↓/↑ speed pills in the header (click to set the global limit).
+    pub speed: Option<Rect>,
     /// Whether the terminal is wide enough to show the details pane by default.
     pub wide: bool,
 }
@@ -72,6 +80,14 @@ impl HitMap {
     pub fn dialog_button_at(&self, pos: Position) -> Option<DialogButton> {
         hit(&self.dialog_buttons, pos)
     }
+
+    /// The form field under `pos`, with the area its text occupies.
+    pub fn field_at(&self, pos: Position) -> Option<(Field, Rect)> {
+        self.fields
+            .iter()
+            .find(|(r, _, _)| r.contains(pos))
+            .map(|(_, f, text)| (*f, *text))
+    }
 }
 
 /// Everything the user can ask for. Keys, toolbar buttons, context-menu items and the
@@ -82,6 +98,11 @@ pub enum Command {
     Pause,
     Resume,
     Remove,
+    PauseAll,
+    ResumeAll,
+    Purge,
+    SpeedLimit,
+    GlobalLimit,
     OpenFolder,
     CopyUrl,
     Details,
@@ -91,13 +112,22 @@ pub enum Command {
 }
 
 impl Command {
-    /// Buttons in the bottom toolbar.
-    pub const TOOLBAR: [Command; 4] = [Self::Add, Self::Pause, Self::Resume, Self::Remove];
-    /// Items of a download's context menu.
-    pub const MENU: [Command; 5] = [
+    /// Buttons in the bottom toolbar, in order of importance (narrow terminals drop the last).
+    pub const TOOLBAR: [Command; 7] = [
+        Self::Add,
         Self::Pause,
         Self::Resume,
         Self::Remove,
+        Self::PauseAll,
+        Self::ResumeAll,
+        Self::Purge,
+    ];
+    /// Items of a download's context menu.
+    pub const MENU: [Command; 6] = [
+        Self::Pause,
+        Self::Resume,
+        Self::Remove,
+        Self::SpeedLimit,
         Self::OpenFolder,
         Self::CopyUrl,
     ];
@@ -108,6 +138,11 @@ impl Command {
             Self::Pause => "Pause",
             Self::Resume => "Resume",
             Self::Remove => "Remove",
+            Self::PauseAll => "Pause all",
+            Self::ResumeAll => "Resume all",
+            Self::Purge => "Clear finished",
+            Self::SpeedLimit => "Speed limit…",
+            Self::GlobalLimit => "Global speed limit…",
             Self::OpenFolder => "Open folder",
             Self::CopyUrl => "Copy URL",
             Self::Details => "Details",
@@ -124,6 +159,11 @@ impl Command {
             Self::Pause => "p",
             Self::Resume => "r",
             Self::Remove => "d",
+            Self::PauseAll => "P",
+            Self::ResumeAll => "R",
+            Self::Purge => "X",
+            Self::SpeedLimit => "s",
+            Self::GlobalLimit => "S",
             Self::OpenFolder => "o",
             Self::CopyUrl => "c",
             Self::Details => "enter",
@@ -133,10 +173,13 @@ impl Command {
         }
     }
 
-    /// Whether the command applies, given the selected download.
+    /// Whether the command applies, given the selected download. Commands acting on all
+    /// downloads are refined by [`App::can`].
     pub fn enabled(self, selected: Option<&Download>) -> bool {
         match self {
             Self::Add | Self::Details | Self::Help | Self::Quit => true,
+            Self::PauseAll | Self::ResumeAll | Self::Purge | Self::GlobalLimit => true,
+            Self::SpeedLimit => selected.is_some_and(|d| !d.status.is_stopped()),
             Self::Pause => selected.is_some_and(|d| {
                 matches!(d.status, DownloadStatus::Active | DownloadStatus::Waiting)
             }),
@@ -170,6 +213,16 @@ pub enum Action {
     RemoveResult(Gid),
     OpenFolder(String),
     Copy(String),
+    Add {
+        sources: Vec<Source>,
+        options: AddOptions,
+    },
+    PauseAll,
+    ResumeAll,
+    /// Forget all finished, failed and removed downloads.
+    Purge,
+    LoadLimits(Target),
+    SetLimits(Target, Limits),
 }
 
 /// A modal dialog.
@@ -177,6 +230,19 @@ pub enum Action {
 pub enum Dialog {
     Help,
     ConfirmRemove { gid: Gid, name: String },
+    Add(AddForm),
+    Limits(LimitsForm),
+}
+
+impl Dialog {
+    /// The dialog as a form, if it is one.
+    pub fn form(&mut self) -> Option<&mut dyn Form> {
+        match self {
+            Self::Add(f) => Some(f),
+            Self::Limits(f) => Some(f),
+            Self::Help | Self::ConfirmRemove { .. } => None,
+        }
+    }
 }
 
 /// Buttons inside a dialog. In the help dialog `Cancel` is the "Close" button.
@@ -235,6 +301,10 @@ pub struct App {
     pub last_click: Option<(Instant, Gid)>,
     /// Side effects waiting for the event loop.
     pub actions: Vec<Action>,
+    /// Pre-filled "Save to" directory of the Add dialog.
+    pub default_dir: String,
+    /// Global speed limits, once known.
+    pub global_limits: Option<Limits>,
     pub should_quit: bool,
 }
 
@@ -259,6 +329,8 @@ impl App {
             dragging: false,
             last_click: None,
             actions: Vec::new(),
+            default_dir: String::new(),
+            global_limits: None,
             should_quit: false,
         }
     }
@@ -423,16 +495,69 @@ impl App {
         });
     }
 
+    /// Whether `cmd` can run now.
+    pub fn can(&self, cmd: Command) -> bool {
+        let any = |f: fn(&Download) -> bool| self.state.snapshot.iter().any(f);
+        match cmd {
+            Command::PauseAll => {
+                any(|d| matches!(d.status, DownloadStatus::Active | DownloadStatus::Waiting))
+            }
+            Command::ResumeAll => any(|d| d.status == DownloadStatus::Paused),
+            Command::Purge => any(|d| d.status.is_stopped()),
+            _ => cmd.enabled(self.selected_download()),
+        }
+    }
+
+    /// Open the Add dialog, pre-filled with `text` (e.g. something pasted).
+    pub fn open_add(&mut self, text: &str) {
+        self.menu = None;
+        self.dialog = Some(Dialog::Add(AddForm::new(&self.default_dir, text)));
+    }
+
+    fn open_limits(&mut self, target: Target, subject: String) {
+        let mut form = LimitsForm::new(target.clone(), subject);
+        if let (Target::Global, Some(current)) = (&target, self.global_limits) {
+            form.fill(current);
+        }
+        self.dialog = Some(Dialog::Limits(form));
+        self.actions.push(Action::LoadLimits(target));
+    }
+
+    /// Apply a message from the action executor.
+    pub fn on_feedback(&mut self, feedback: Feedback) {
+        match feedback {
+            Feedback::Toast { text, error } => self.notify(text, error),
+            Feedback::Limits(target, limits) => {
+                if target == Target::Global {
+                    self.global_limits = Some(limits);
+                }
+                if let Some(Dialog::Limits(form)) = &mut self.dialog
+                    && form.target == target
+                {
+                    form.fill(limits);
+                }
+            }
+        }
+    }
+
     /// Run `cmd` against the selected download. Disabled commands do nothing.
     pub fn run(&mut self, cmd: Command) {
         self.menu = None;
-        let selected = self.selected_download().cloned();
-        if !cmd.enabled(selected.as_ref()) {
+        if !self.can(cmd) {
             return;
         }
+        let selected = self.selected_download().cloned();
         let gid = || selected.as_ref().map(|d| d.gid.clone()).unwrap_or_default();
         match cmd {
-            Command::Add => self.notify("The Add dialog is coming in the next milestone", false),
+            Command::Add => self.open_add(""),
+            Command::PauseAll => self.actions.push(Action::PauseAll),
+            Command::ResumeAll => self.actions.push(Action::ResumeAll),
+            Command::Purge => self.actions.push(Action::Purge),
+            Command::SpeedLimit => {
+                let name = selected.as_ref().map(Download::name).unwrap_or_default();
+                self.open_limits(Target::Download(gid()), name);
+            }
+            Command::GlobalLimit => self.open_limits(Target::Global, "All downloads".into()),
             Command::Pause => self.actions.push(Action::Pause(gid())),
             Command::Resume => self.actions.push(Action::Resume(gid())),
             Command::Remove => {
@@ -473,13 +598,39 @@ impl App {
         }
     }
 
-    /// Press a dialog button.
+    /// Press a dialog button. A form that fails validation stays open showing the error.
     pub fn press_dialog(&mut self, button: DialogButton) {
         let Some(dialog) = self.dialog.take() else {
             return;
         };
-        if let (Dialog::ConfirmRemove { gid, .. }, DialogButton::Confirm) = (dialog, button) {
-            self.actions.push(Action::Remove(gid));
+        if button == DialogButton::Cancel {
+            return;
+        }
+        match dialog {
+            Dialog::Help => {}
+            Dialog::ConfirmRemove { gid, .. } => self.actions.push(Action::Remove(gid)),
+            Dialog::Add(mut form) => match form.submit() {
+                Ok((sources, options)) => {
+                    let paused = options.paused;
+                    self.actions.push(Action::Add { sources, options });
+                    self.set_filter(if paused {
+                        Filter::Waiting
+                    } else {
+                        Filter::Active
+                    });
+                }
+                Err(e) => {
+                    form.error = Some(e);
+                    self.dialog = Some(Dialog::Add(form));
+                }
+            },
+            Dialog::Limits(mut form) => match form.submit() {
+                Ok(limits) => self.actions.push(Action::SetLimits(form.target, limits)),
+                Err(e) => {
+                    form.error = Some(e);
+                    self.dialog = Some(Dialog::Limits(form));
+                }
+            },
         }
     }
 

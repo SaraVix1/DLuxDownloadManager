@@ -2,9 +2,11 @@
 
 mod actions;
 mod app;
+mod forms;
 mod input;
 mod overlay;
 mod terminal;
+mod textfield;
 mod theme;
 mod ui;
 
@@ -36,13 +38,17 @@ pub async fn run(aria2: &Aria2, cfg: &Config) -> Result<()> {
         },
     };
     let mut app = App::new(Theme::for_terminal(&cfg.ui.theme), info);
+    app.default_dir = cfg.download_dir().display().to_string();
     let (mut polls, poller) = spawn_poller(aria2.client().clone(), POLL_INTERVAL);
-    let (outcome_tx, mut outcomes) = mpsc::unbounded_channel();
+    let (feedback_tx, mut feedback) = mpsc::unbounded_channel();
     let executor = Executor {
         client: aria2.client().clone(),
         refresh: poller.refresher(),
-        outcomes: outcome_tx,
+        feedback: feedback_tx,
     };
+    // Show the global speed limits in the header from the start.
+    app.actions
+        .push(app::Action::LoadLimits(dlux_core::limits::Target::Global));
 
     let mut guard = terminal::init().context("cannot initialise the terminal")?;
     let mut events = EventStream::new();
@@ -56,7 +62,7 @@ pub async fn run(aria2: &Aria2, cfg: &Config) -> Result<()> {
                     Some(event) => app.state.handle(event),
                     None => bail!("the aria2 poller stopped unexpectedly"),
                 },
-                Some(outcome) = outcomes.recv() => app.notify(outcome.text, outcome.error),
+                Some(message) = feedback.recv() => app.on_feedback(message),
                 event = events.next() => match event {
                     Some(Ok(event)) => app.on_event(event),
                     Some(Err(e)) => return Err(e).context("reading terminal input"),

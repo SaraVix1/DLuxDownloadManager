@@ -3,7 +3,9 @@
 //! message is printed to a sane terminal).
 
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -30,13 +32,20 @@ impl Drop for TerminalGuard {
     }
 }
 
-/// Enter raw mode and the alternate screen with mouse capture on.
+/// Enter raw mode and the alternate screen with mouse capture and bracketed paste on (so a
+/// pasted or dropped multi-line text arrives as one event instead of keystrokes).
 pub fn init() -> io::Result<TerminalGuard> {
     install_panic_hook();
     enable_raw_mode()?;
     ACTIVE.store(true, Ordering::SeqCst);
     let mut stdout = io::stdout();
-    if let Err(e) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture, Hide) {
+    if let Err(e) = execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste,
+        Hide
+    ) {
         restore();
         return Err(e);
     }
@@ -54,6 +63,7 @@ pub fn restore() {
     if ACTIVE.swap(false, Ordering::SeqCst) {
         let _ = execute!(
             io::stdout(),
+            DisableBracketedPaste,
             DisableMouseCapture,
             LeaveAlternateScreen,
             Show
