@@ -1,8 +1,10 @@
 //! `dlux` — Download everything. Beautifully.
 
 mod cli;
+mod signals;
 mod status;
 mod tui;
+mod web;
 
 use anyhow::{Result, bail};
 use clap::Parser;
@@ -102,12 +104,21 @@ async fn run(cli: Cli) -> Result<()> {
     let command = cli.command.unwrap_or(Command::Tui);
     match command {
         Command::Config(cmd) => config_command(&cli.global, cmd),
-        Command::Serve(args) => serve(&cli.global, &args),
+        Command::Serve(args) => {
+            check_serve(&cli.global, &args)?;
+            with_aria2(&cli.global, Signals::Handled, async |aria2, cfg| {
+                web::serve(aria2, cfg, &args).await
+            })
+            .await
+        }
         Command::Tui => {
-            with_aria2(&cli.global, async |aria2, cfg| tui::run(aria2, cfg).await).await
+            with_aria2(&cli.global, Signals::Handled, async |aria2, cfg| {
+                tui::run(aria2, cfg).await
+            })
+            .await
         }
         Command::Status { json } => {
-            with_aria2(&cli.global, async |aria2, _| {
+            with_aria2(&cli.global, Signals::Interrupt, async |aria2, _| {
                 status::print(aria2, json).await
             })
             .await
@@ -115,36 +126,46 @@ async fn run(cli: Cli) -> Result<()> {
     }
 }
 
+/// Who reacts to Ctrl-C / SIGTERM while a command runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Signals {
+    /// The command shuts down cleanly on its own (TUI, web server).
+    Handled,
+    /// Abort the command on Ctrl-C.
+    Interrupt,
+}
+
 /// Connect to (or spawn) aria2, run `f`, and always stop a spawned aria2 afterwards — also on
 /// error and on Ctrl-C.
 async fn with_aria2(
     global: &GlobalArgs,
+    signals: Signals,
     f: impl AsyncFnOnce(&Aria2, &Config) -> Result<()>,
 ) -> Result<()> {
     let cfg = load_config(global)?;
     let aria2 = aria2::connect(&ConnectOptions::from_config(&cfg)).await?;
-    let result = tokio::select! {
-        r = f(&aria2, &cfg) => r,
-        _ = tokio::signal::ctrl_c() => Err(anyhow::anyhow!("interrupted")),
+    let result = match signals {
+        Signals::Handled => f(&aria2, &cfg).await,
+        Signals::Interrupt => tokio::select! {
+            r = f(&aria2, &cfg) => r,
+            _ = tokio::signal::ctrl_c() => Err(anyhow::anyhow!("interrupted")),
+        },
     };
     aria2.shutdown().await;
     result
 }
 
-fn serve(global: &GlobalArgs, args: &ServeArgs) -> Result<()> {
+/// Fail fast, before starting aria2, if `serve` would refuse to run.
+fn check_serve(global: &GlobalArgs, args: &ServeArgs) -> Result<()> {
     let cfg = load_config(global)?;
-    if !args.bind.is_loopback() && cfg.web.token.is_none() {
+    if !args.bind.is_loopback() && cfg.web.token.as_deref().is_none_or(str::is_empty) {
         bail!(
             "refusing to bind to {} without authentication: set `token` under [web] in {}",
             args.bind,
             config_path(global).display()
         );
     }
-    bail!(
-        "the web UI is not built yet (milestone 6); it will listen on http://{}:{}",
-        args.bind,
-        args.port
-    )
+    Ok(())
 }
 
 fn config_command(global: &GlobalArgs, cmd: ConfigCommand) -> Result<()> {

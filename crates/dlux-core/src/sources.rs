@@ -199,7 +199,8 @@ pub struct AddOptions {
 }
 
 impl AddOptions {
-    fn to_aria2(&self) -> Options {
+    /// The options as aria2 expects them.
+    pub fn to_aria2(&self) -> Options {
         let mut o = Options::new();
         if let Some(dir) = self.dir.as_ref().filter(|d| !d.trim().is_empty()) {
             o.insert(

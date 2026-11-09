@@ -4,18 +4,15 @@
 
 use super::app::Action;
 use base64::Engine;
-use dlux_core::jobs::{self, JobManager};
 use dlux_core::limits::{self, Limits, Target};
 use dlux_core::paths;
-use dlux_core::rpc::Client;
-use dlux_core::sources::{self, AddOptions, Source};
+use dlux_core::service::{self, Service};
 use dlux_core::ytdlp::VideoInfo;
 use std::io::Write;
 use std::process::Stdio;
-use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::mpsc;
 
 /// A message from a finished action to the UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,100 +45,78 @@ impl Feedback {
 }
 
 pub struct Executor {
-    pub client: Client,
-    /// yt-dlp downloads and tool installs.
-    pub jobs: JobManager,
-    /// Ask the poller for a fresh snapshot once an aria2 call succeeded.
-    pub refresh: Arc<Notify>,
+    /// The operations shared with the web UI.
+    pub service: Service,
     pub feedback: mpsc::UnboundedSender<Feedback>,
 }
 
 impl Executor {
+    /// Run `fut` in the background; toast its error, or `success` when given.
+    fn spawn<T: Send + 'static>(
+        &self,
+        success: Option<&'static str>,
+        fut: impl Future<Output = service::Result<T>> + Send + 'static,
+    ) {
+        let tx = self.feedback.clone();
+        tokio::spawn(async move {
+            match fut.await {
+                Ok(_) => {
+                    if let Some(msg) = success {
+                        let _ = tx.send(Feedback::ok(msg));
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(Feedback::err(e.to_string()));
+                }
+            }
+        });
+    }
+
     /// Start `action`. `terminal` is where the OSC 52 clipboard sequence is written.
     pub fn run(&self, action: Action, terminal: &mut impl Write) {
-        if self.run_local(&action) {
-            return;
-        }
-        let c = self.client.clone();
+        let svc = self.service.clone();
         let tx = self.feedback.clone();
         match action {
-            Action::Probe(url) => {
-                let jobs = self.jobs.clone();
-                tokio::spawn(async move {
-                    let result = jobs.probe(&url).await;
-                    let _ = tx.send(Feedback::Probe { url, result });
-                });
-            }
-            Action::StartVideo(spec) => {
-                self.jobs.start_video(spec);
-            }
-            Action::UpdateYtDlp => {
-                let jobs = self.jobs.clone();
-                tokio::spawn(async move {
-                    let _ = tx.send(match jobs.update_ytdlp().await {
-                        Ok(msg) => Feedback::ok(msg),
-                        Err(e) => Feedback::err(e),
-                    });
-                });
-            }
-            Action::Pause(gid) => {
-                self.rpc("pause", None, async move { c.pause(&gid).await.map(drop) })
-            }
-            Action::Resume(gid) => {
-                self.rpc(
-                    "resume",
-                    None,
-                    async move { c.unpause(&gid).await.map(drop) },
-                );
-            }
-            Action::Remove(gid) => {
-                self.rpc(
-                    "remove",
-                    None,
-                    async move { c.remove(&gid).await.map(drop) },
-                );
-            }
-            Action::RemoveResult(gid) => {
-                self.rpc("remove", None, async move {
-                    c.remove_download_result(&gid).await
-                });
+            Action::Pause(gid) => self.spawn(None, async move { svc.pause(&gid).await }),
+            Action::Resume(gid) => self.spawn(None, async move { svc.resume(&gid).await }),
+            Action::Remove(gid) | Action::RemoveResult(gid) => {
+                self.spawn(None, async move { svc.remove(&gid).await });
             }
             Action::PauseAll => {
-                self.rpc("pause all", Some("Paused all downloads"), async move {
-                    c.pause_all().await
+                self.spawn(Some("Paused all downloads"), async move {
+                    svc.pause_all().await
                 });
             }
             Action::ResumeAll => {
-                self.rpc("resume all", Some("Resumed all downloads"), async move {
-                    c.unpause_all().await
+                self.spawn(Some("Resumed all downloads"), async move {
+                    svc.resume_all().await
                 });
             }
             Action::Purge => {
-                self.rpc(
-                    "clear finished",
-                    Some("Cleared finished downloads"),
-                    async move { c.purge_download_result().await },
-                );
+                self.spawn(Some("Cleared finished downloads"), async move {
+                    svc.purge().await
+                });
             }
             Action::Add { sources, options } => {
-                let refresh = Arc::clone(&self.refresh);
                 tokio::spawn(async move {
-                    let feedback = add(&c, &sources, &options).await;
-                    refresh.notify_one();
-                    let _ = tx.send(feedback);
+                    let summary = svc.add(&sources, &options).await;
+                    let _ = tx.send(Feedback::Toast {
+                        text: summary.message(),
+                        error: !summary.ok(),
+                    });
                 });
             }
             Action::LoadLimits(target) => {
                 tokio::spawn(async move {
-                    let _ = tx.send(match limits::get(&c, &target).await {
+                    let _ = tx.send(match svc.limits(&target).await {
                         Ok(l) => Feedback::Limits(target, l),
-                        Err(e) => Feedback::err(format!("Could not read the speed limit: {e}")),
+                        Err(e) => Feedback::err(e.to_string()),
                     });
                 });
             }
             Action::SetLimits(target, new) => {
                 tokio::spawn(async move {
-                    match limits::set(&c, &target, new).await {
+                    match svc.set_limits(&target, new).await {
                         Ok(()) => {
                             let scope = match target {
                                 Target::Global => "Global limit",
@@ -155,9 +130,28 @@ impl Executor {
                             )));
                         }
                         Err(e) => {
-                            let _ = tx.send(Feedback::err(format!("Could not set the limit: {e}")));
+                            let _ = tx.send(Feedback::err(e.to_string()));
                         }
                     }
+                });
+            }
+            Action::Probe(url) => {
+                tokio::spawn(async move {
+                    let result = svc.probe(&url).await.map_err(|e| e.to_string());
+                    let _ = tx.send(Feedback::Probe { url, result });
+                });
+            }
+            Action::StartVideo(spec) => {
+                if let Err(e) = svc.start_video(spec) {
+                    let _ = tx.send(Feedback::err(e.to_string()));
+                }
+            }
+            Action::UpdateYtDlp => {
+                tokio::spawn(async move {
+                    let _ = tx.send(match svc.update_ytdlp().await {
+                        Ok(msg) => Feedback::ok(msg),
+                        Err(e) => Feedback::err(e.to_string()),
+                    });
                 });
             }
             Action::OpenFolder(dir) => {
@@ -179,75 +173,6 @@ impl Executor {
                 });
             }
         }
-    }
-
-    /// Handle `action` for local jobs. Returns true when it was only about a local job; "all"
-    /// actions apply to local jobs and then continue to aria2.
-    fn run_local(&self, action: &Action) -> bool {
-        let local = |gid: &str| jobs::local_id(gid);
-        match action {
-            Action::Pause(gid) => local(gid).map(|id| self.jobs.pause(id)).is_some(),
-            Action::Resume(gid) => local(gid).map(|id| self.jobs.resume(id)).is_some(),
-            Action::Remove(gid) | Action::RemoveResult(gid) => {
-                local(gid).map(|id| self.jobs.remove(id)).is_some()
-            }
-            Action::PauseAll => {
-                self.jobs.pause_all();
-                false
-            }
-            Action::ResumeAll => {
-                self.jobs.resume_all();
-                false
-            }
-            Action::Purge => {
-                self.jobs.purge();
-                false
-            }
-            _ => false,
-        }
-    }
-
-    /// Run an aria2 call; refresh on success (with an optional toast), toast on failure.
-    fn rpc(
-        &self,
-        what: &'static str,
-        success: Option<&'static str>,
-        call: impl Future<Output = dlux_core::rpc::Result<()>> + Send + 'static,
-    ) {
-        let refresh = Arc::clone(&self.refresh);
-        let tx = self.feedback.clone();
-        tokio::spawn(async move {
-            match call.await {
-                Ok(()) => {
-                    refresh.notify_one();
-                    if let Some(msg) = success {
-                        let _ = tx.send(Feedback::ok(msg));
-                    }
-                }
-                Err(e) => {
-                    let _ = tx.send(Feedback::err(format!("Could not {what}: {e}")));
-                }
-            }
-        });
-    }
-}
-
-/// Add the sources and summarise the result in one toast.
-async fn add(client: &Client, sources: &[Source], options: &AddOptions) -> Feedback {
-    let results = sources::add(client, sources, options).await;
-    let total = results.len();
-    let failed: Vec<_> = sources
-        .iter()
-        .zip(&results)
-        .filter_map(|(s, r)| r.as_ref().err().map(|e| (s, e)))
-        .collect();
-    let added = total - failed.len();
-    let noun = |n: usize| if n == 1 { "download" } else { "downloads" };
-    match failed.first() {
-        None if total == 1 => Feedback::ok(format!("Added {}", sources[0])),
-        None => Feedback::ok(format!("Added {total} {}", noun(total))),
-        Some((s, e)) if added == 0 => Feedback::err(format!("Could not add {s}: {e}")),
-        Some((s, e)) => Feedback::err(format!("Added {added} of {total} · {s}: {e}")),
     }
 }
 

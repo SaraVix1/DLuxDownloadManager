@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dlux</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center;
+         background: #1a1b26; color: #c0caf5; font: 15px/1.5 system-ui, sans-serif; }
+  main { max-width: 34rem; padding: 2rem 1rem; }
+  h1 { margin: 0 0 .25rem; font-size: 2rem; }
+  h1 span:nth-child(1) { color: #9d7cd8 } h1 span:nth-child(2) { color: #7aa2f7 }
+  h1 span:nth-child(3) { color: #7dcfff } h1 span:nth-child(4) { color: #73daca }
+  h1 span:nth-child(5) { color: #bb9af7 }
+  p { color: #a9b1d6; } em { color: #565f89; }
+  .live { display: flex; gap: .5rem; flex-wrap: wrap; margin: 1.25rem 0; }
+  .pill { padding: .2rem .75rem; border-radius: 999px; background: #292e42; font-weight: 600; }
+  .down { background: #9ece6a; color: #16161e } .up { background: #bb9af7; color: #16161e }
+  code { color: #7aa2f7; }
+</style>
+</head>
+<body>
+<main>
+  <h1><span>◆</span> <span>d</span><span>l</span><span>u</span><span>x</span></h1>
+  <p><em>Download everything. Beautifully.</em></p>
+  <div class="live">
+    <span class="pill" id="status">connecting…</span>
+    <span class="pill down" id="down">↓ –</span>
+    <span class="pill up" id="up">↑ –</span>
+    <span class="pill" id="count">– downloads</span>
+  </div>
+  <p>The web interface arrives in the next release. The API is ready: live state over
+     <code>/api/ws</code>, JSON at <code>/api/state</code>.</p>
+</main>
+<script>
+  const fmt = b => { const u = ["B","KiB","MiB","GiB"]; let i = 0;
+    while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
+    return (i ? b.toFixed(1) : b) + " " + u[i] + "/s"; };
+  function connect() {
+    const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/api/ws");
+    ws.onmessage = e => { const s = JSON.parse(e.data);
+      document.getElementById("status").textContent = s.aria2.connected ? "aria2 " + s.aria2.version : "aria2 offline";
+      document.getElementById("down").textContent = "↓ " + fmt(s.speed.download);
+      document.getElementById("up").textContent = "↑ " + fmt(s.speed.upload);
+      document.getElementById("count").textContent = s.downloads.length + " downloads"; };
+    ws.onclose = () => { document.getElementById("status").textContent = "reconnecting…"; setTimeout(connect, 2000); };
+  }
+  connect();
+</script>
+</body>
+</html>

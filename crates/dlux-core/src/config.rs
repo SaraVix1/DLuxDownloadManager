@@ -154,6 +154,17 @@ impl Config {
         paths::expand_tilde(&self.downloads.dir)
     }
 
+    /// The local `aria2c` binary (configured path, else PATH), e.g. for yt-dlp to use as its
+    /// downloader. `None` if there is none on this machine.
+    pub fn aria2c_binary(&self) -> Option<PathBuf> {
+        self.aria2
+            .aria2c_path
+            .as_ref()
+            .map(paths::expand_tilde)
+            .filter(|p| p.is_file())
+            .or_else(|| paths::find_binary("aria2c"))
+    }
+
     /// Treat empty strings as "unset" so `rpc_secret = ""` behaves like no secret.
     fn normalize(&mut self) {
         fn clear_empty(s: &mut Option<String>) {

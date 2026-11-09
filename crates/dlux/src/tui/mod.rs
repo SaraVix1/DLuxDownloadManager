@@ -17,6 +17,7 @@ use crossterm::event::EventStream;
 use dlux_core::Config;
 use dlux_core::aria2::{Aria2, Origin};
 use dlux_core::jobs::JobManager;
+use dlux_core::service::Service;
 use dlux_core::state::{POLL_INTERVAL, spawn_poller};
 use futures_util::StreamExt;
 use theme::Theme;
@@ -43,19 +44,10 @@ pub async fn run(aria2: &Aria2, cfg: &Config) -> Result<()> {
     let (mut polls, poller) = spawn_poller(aria2.client().clone(), POLL_INTERVAL);
     let (feedback_tx, mut feedback) = mpsc::unbounded_channel();
     // yt-dlp uses aria2c as its downloader too (its own process, not our RPC instance).
-    let aria2c = cfg
-        .aria2
-        .aria2c_path
-        .as_ref()
-        .map(dlux_core::paths::expand_tilde)
-        .filter(|p| p.is_file())
-        .or_else(|| dlux_core::paths::find_binary("aria2c"));
-    let jobs = JobManager::new(aria2c);
+    let jobs = JobManager::new(cfg.aria2c_binary());
     let jobs_changed = jobs.changed();
     let executor = Executor {
-        jobs: jobs.clone(),
-        client: aria2.client().clone(),
-        refresh: poller.refresher(),
+        service: Service::new(aria2.client().clone(), jobs.clone(), poller.refresher()),
         feedback: feedback_tx,
     };
     // Show the global speed limits in the header from the start.
@@ -64,7 +56,7 @@ pub async fn run(aria2: &Aria2, cfg: &Config) -> Result<()> {
 
     let mut guard = terminal::init().context("cannot initialise the terminal")?;
     let mut events = EventStream::new();
-    let mut shutdown = std::pin::pin!(shutdown_signal());
+    let mut shutdown = std::pin::pin!(crate::signals::shutdown());
 
     let result: Result<()> = async {
         loop {
@@ -102,23 +94,4 @@ pub async fn run(aria2: &Aria2, cfg: &Config) -> Result<()> {
     // Stop yt-dlp (and the aria2c it runs) after the terminal is restored.
     jobs.shutdown().await;
     result
-}
-
-/// Resolves on SIGTERM/SIGHUP (Unix) or Ctrl-C delivered as a signal (e.g. outside raw mode).
-async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut term = signal(SignalKind::terminate()).ok();
-        let mut hup = signal(SignalKind::hangup()).ok();
-        tokio::select! {
-            _ = async { if let Some(s) = term.as_mut() { s.recv().await } else { std::future::pending().await } } => {}
-            _ = async { if let Some(s) = hup.as_mut() { s.recv().await } else { std::future::pending().await } } => {}
-            _ = tokio::signal::ctrl_c() => {}
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-    }
 }

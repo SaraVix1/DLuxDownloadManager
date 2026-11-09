@@ -121,7 +121,7 @@ impl RawFormat {
 }
 
 /// One choice in the format picker.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Choice {
     /// "Best quality", "1080p60", "Audio only".
     pub label: String,
@@ -136,7 +136,7 @@ pub struct Choice {
 }
 
 /// A probed page.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct VideoInfo {
     pub url: String,
     pub title: String,

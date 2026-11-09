@@ -35,9 +35,10 @@ web/                    # (milestone 7) Svelte/React + Vite + Tailwind frontend,
 - Module split in `dlux-core`: `rpc` (client + types), `aria2` (connect/spawn), `config`, `paths`,
   `fmt`, `state` (app state, filters, speed history, poller), `sources`, `limits`, `binaries`
   (find/install yt-dlp + ffmpeg), `ytdlp` (probe, format choices, command, output parsing),
-  `jobs` (yt-dlp downloads and tool installs run by dlux itself).
-  In `dlux`: `cli`, `status`, `tui` (`app` state/input, `ui` rendering, `theme`, `terminal`), later
-  `web`.
+  `jobs` (yt-dlp downloads and tool installs run by dlux itself), `service` (every operation the
+  front ends offer — both the TUI and the web API call it).
+  In `dlux`: `cli`, `status`, `signals`, `tui` (`app` state/input, `ui` rendering, `theme`,
+  `terminal`), `web` (`api` handlers, `guard` request checks, `view` JSON shape).
 - MSRV: Rust 1.88 (required by ratatui 0.30). Edition 2024.
 - Both front ends consume the same core: a polling loop builds a `Snapshot` (global stat + active +
   waiting + stopped via `system.multicall`) once per second.
@@ -111,7 +112,7 @@ details. Keyboard too: j/k, a, p, r, d, tab, ?, q.
 3. [x] Complete mouse support and keyboard shortcuts
 4. [x] Add dialog (URLs, magnets, torrents) and download controls
 5. [x] yt-dlp and ffmpeg integration with the format picker
-6. [ ] Web backend (REST + WebSocket)
+6. [x] Web backend (REST + WebSocket)
 7. [ ] Web frontend, embedded in the binary
 8. [ ] Packaging, CI/CD, README, release v0.1.0
 
@@ -175,3 +176,15 @@ details. Keyboard too: j/k, a, p, r, d, tab, ?, q.
   `video` / `tool` with job notes (merging, stream 2, item 3/23, already on disk); `U` updates
   yt-dlp. Known limits: YouTube now wants a JS runtime (deno) for all formats; aria2c gets one
   connection on small streams.
+- **M6** (branch `feat/web-backend`): core `service::Service` holds every operation (pause/resume/
+  remove routed to jobs or aria2, add text/files, limits, probe, start video, update yt-dlp) with
+  `service::Error` = Invalid/NotFound/Failed; the TUI executor now calls it too. `dlux serve`:
+  axum router (route table in `web/mod.rs` docs), a hub task that rebuilds the `view::StateView`
+  JSON after every poll/job change into a `watch` channel, `/api/state` + `/api/ws` read it.
+  `guard`: without a token only loopback `Host` names (DNS rebinding), `Origin` must match `Host`
+  (CSRF + WebSocket hijacking), form content types refused; with a token, Bearer / `dlux_token`
+  cookie / `?token=` (sets the HttpOnly SameSite=Strict cookie). Uploads are raw bodies (32 MB
+  limit). `/` serves a placeholder page with live speeds until M7. Ctrl-C/SIGTERM: graceful
+  shutdown, jobs stopped, spawned aria2 shut down (`with_aria2` takes `Signals::Handled`).
+  Integration tests in `web/tests.rs` run the real router against a private aria2 (the test file
+  server honours `Range`, or aria2 fails resumed downloads).

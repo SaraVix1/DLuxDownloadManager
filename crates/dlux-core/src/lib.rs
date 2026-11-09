@@ -12,6 +12,7 @@
 //! - [`limits`] — parsing and applying global / per-download speed limits
 //! - [`ytdlp`] — probing video pages, the format picker, download commands and progress parsing
 //! - [`jobs`] — downloads dlux runs itself (yt-dlp videos, tool installs), listed like aria2's
+//! - [`service`] — every operation the front ends offer, routed to aria2 or local jobs
 //! - [`state`] — app state shared by the front ends: snapshot, filters, speed history, poller
 
 pub mod aria2;
@@ -23,6 +24,7 @@ pub mod jobs;
 pub mod limits;
 pub mod paths;
 pub mod rpc;
+pub mod service;
 pub mod sources;
 pub mod state;
 pub mod ytdlp;
