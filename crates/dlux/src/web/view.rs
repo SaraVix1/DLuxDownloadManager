@@ -9,6 +9,8 @@ use serde::Serialize;
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct StateView {
     pub version: &'static str,
+    /// Where downloads go unless a directory is given (on the server).
+    pub default_dir: String,
     pub aria2: Aria2View,
     pub speed: Speed,
     /// Last 60 s of (download, upload) speeds, oldest first.
@@ -133,12 +135,19 @@ pub fn download(d: &Download, job: Option<&Job>) -> DownloadView {
 }
 
 /// Build the view. `jobs` are the local jobs behind `state.local`.
-pub fn state(state: &AppState, jobs: &[Job], aria2_version: &str, origin: &str) -> StateView {
+pub fn state(
+    state: &AppState,
+    jobs: &[Job],
+    aria2_version: &str,
+    origin: &str,
+    default_dir: &str,
+) -> StateView {
     let counts = state.counts();
     let job =
         |gid: &str| dlux_core::jobs::local_id(gid).and_then(|id| jobs.iter().find(|j| j.id == id));
     StateView {
         version: env!("CARGO_PKG_VERSION"),
+        default_dir: default_dir.to_owned(),
         aria2: Aria2View {
             version: aria2_version.to_owned(),
             origin: origin.to_owned(),
@@ -203,7 +212,8 @@ mod tests {
             }],
             ..Default::default()
         });
-        let v = state(&st, &[], "1.37.0", "started by dlux");
+        let v = state(&st, &[], "1.37.0", "started by dlux", "/dl");
+        assert_eq!(v.default_dir, "/dl");
         assert!(v.aria2.connected);
         assert_eq!(
             v.speed,

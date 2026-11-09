@@ -1,2 +1,5 @@
 /target
 **/*.rs.bk
+/web/node_modules
+# Built web UI (npm --prefix web run build); embedded by crates/dlux/build.rs
+/crates/dlux/web-dist

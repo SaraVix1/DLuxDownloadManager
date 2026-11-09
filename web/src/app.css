@@ -1,0 +1,55 @@
+@import "tailwindcss";
+
+/* Tokyo Night, as in the TUI. */
+@theme {
+  --color-base: #1a1b26;
+  --color-sunk: #16161e;
+  --color-raised: #292e42;
+  --color-hover: #21232f;
+  --color-line: #3b4261;
+  --color-line-focus: #7aa2f7;
+  --color-fg: #c0caf5;
+  --color-fg-dim: #a9b1d6;
+  --color-muted: #565f89;
+  --color-blue: #7aa2f7;
+  --color-cyan: #7dcfff;
+  --color-magenta: #bb9af7;
+  --color-purple: #9d7cd8;
+  --color-orange: #ff9e64;
+  --color-yellow: #e0af68;
+  --color-green: #9ece6a;
+  --color-teal: #73daca;
+  --color-red: #f7768e;
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  background: var(--color-base);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Numbers that update every second shouldn't jitter. */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-blue);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: #33467c;
+}
+
+* {
+  scrollbar-color: var(--color-line) transparent;
+}

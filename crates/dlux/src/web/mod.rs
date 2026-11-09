@@ -6,6 +6,7 @@
 //! | GET    | `/api/state`                       | → full state (as pushed on the WS)   |
 //! | GET    | `/api/ws`                          | WebSocket, one state message per tick|
 //! | POST   | `/api/downloads`                   | `{text?, urls?, dir?, paused?}`      |
+//! | POST   | `/api/sources/check`               | `{text}` → what it would add (preview)|
 //! | POST   | `/api/upload`                      | raw .torrent/.metalink; `?kind&name&dir&paused` |
 //! | POST   | `/api/downloads/{gid}/pause`       |                                      |
 //! | POST   | `/api/downloads/{gid}/resume`      |                                      |
@@ -18,6 +19,7 @@
 //! | POST   | `/api/ytdlp/update`                |                                      |
 
 mod api;
+mod assets;
 mod guard;
 mod view;
 
@@ -45,6 +47,7 @@ fn router(ctx: api::Ctx, guard: guard::Guard) -> Router {
         .route("/state", get(api::state))
         .route("/ws", get(api::ws))
         .route("/downloads", post(api::add))
+        .route("/sources/check", post(api::check_sources))
         .route(
             "/upload",
             post(api::upload).layer(DefaultBodyLimit::max(UPLOAD_LIMIT)),
@@ -68,8 +71,8 @@ fn router(ctx: api::Ctx, guard: guard::Guard) -> Router {
         .route("/ytdlp/update", post(api::update_ytdlp))
         .fallback(api::not_found);
     Router::new()
-        .route("/", get(api::index))
         .nest("/api", api)
+        .fallback(assets::serve)
         .with_state(ctx)
         .layer(axum::middleware::from_fn_with_state(
             guard,
@@ -116,6 +119,7 @@ fn app(aria2: &Aria2, cfg: &Config, token: Option<String>) -> (Router, Backgroun
     let version = aria2.version().version.clone();
     let origin = origin_text(aria2);
     let hub_jobs = jobs.clone();
+    let default_dir = cfg.download_dir().display().to_string();
     let hub = tokio::spawn(async move {
         let mut state = AppState::default();
         let changed = hub_jobs.changed();
@@ -131,7 +135,7 @@ fn app(aria2: &Aria2, cfg: &Config, token: Option<String>) -> (Router, Backgroun
                 () = changed.notified() => state.set_local(hub_jobs.downloads()),
             }
             let jobs = hub_jobs.jobs();
-            let view = view::state(&state, &jobs, &version, &origin);
+            let view = view::state(&state, &jobs, &version, &origin, &default_dir);
             match serde_json::to_string(&view) {
                 Ok(json) => {
                     let _ = state_tx.send(Arc::from(json));

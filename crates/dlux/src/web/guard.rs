@@ -8,9 +8,13 @@
 //! - **form-based CSRF**: bodies with a content type an HTML form can send cross-site
 //!   (`text/plain`, urlencoded, multipart) are refused.
 //!
-//! With a token configured (required when binding to a non-loopback address), every request
+//! With a token configured (required when binding to a non-loopback address), every API request
 //! must also carry it: `Authorization: Bearer <token>`, a `dlux_token` cookie, or `?token=`
-//! (for the first page load and WebSockets). A valid `?token=` sets the cookie.
+//! (for the first page load and WebSockets). A valid `?token=` sets the cookie. The static page
+//! itself (GET outside `/api/`) loads without it so it can show a sign-in screen; it contains no
+//! data.
+//!
+//! Every response also carries a strict Content-Security-Policy and anti-framing headers.
 
 use axum::body::Body;
 use axum::extract::{Request, State};
@@ -126,6 +130,7 @@ impl Guard {
     pub fn check(
         &self,
         method: &Method,
+        path: &str,
         headers: &HeaderMap,
         query: Option<&str>,
     ) -> Result<Option<String>, Denied> {
@@ -154,6 +159,7 @@ impl Guard {
         let Some(expected) = &self.token else {
             return Ok(None);
         };
+        let shell = matches!(*method, Method::GET | Method::HEAD) && !path.starts_with("/api/");
         let bearer = headers
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
@@ -169,6 +175,8 @@ impl Guard {
         } else if ok(&from_query) {
             // Remember it so the page's own requests don't need it in the URL.
             Ok(from_query)
+        } else if shell {
+            Ok(None)
         } else {
             Err(deny(
                 StatusCode::UNAUTHORIZED,
@@ -178,16 +186,46 @@ impl Guard {
     }
 }
 
+/// The page only talks to its own origin; nothing may frame it.
+const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+    img-src 'self' data:; connect-src 'self'; worker-src 'self'; manifest-src 'self'; \
+    frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+
+fn secure_headers(h: &mut HeaderMap) {
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(CSP),
+    );
+    h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    h.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+}
+
 pub async fn middleware(
     State(guard): State<Arc<Guard>>,
     req: Request<Body>,
     next: Next,
 ) -> Response {
-    let set_cookie = match guard.check(req.method(), req.headers(), req.uri().query()) {
-        Ok(c) => c,
-        Err(denied) => return denied.into_response(),
+    let checked = guard.check(
+        req.method(),
+        req.uri().path(),
+        req.headers(),
+        req.uri().query(),
+    );
+    let mut resp = match checked {
+        Ok(_) => next.run(req).await,
+        Err(denied) => denied.into_response(),
     };
-    let mut resp = next.run(req).await;
+    secure_headers(resp.headers_mut());
+    let Ok(set_cookie) = checked else {
+        return resp;
+    };
     if let Some(token) = set_cookie {
         let cookie = format!("{COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict");
         if let Ok(v) = HeaderValue::from_str(&cookie) {
@@ -227,35 +265,43 @@ mod tests {
             "app.localhost",
         ] {
             assert_eq!(
-                status(g.check(&get, &headers(&[("host", host)]), None)),
+                status(g.check(&get, "/api/x", &headers(&[("host", host)]), None)),
                 StatusCode::OK,
                 "{host}"
             );
         }
         assert_eq!(
-            status(g.check(&get, &headers(&[("host", "evil.example:8080")]), None)),
+            status(g.check(
+                &get,
+                "/api/x",
+                &headers(&[("host", "evil.example:8080")]),
+                None
+            )),
             StatusCode::FORBIDDEN,
             "DNS rebinding"
         );
         assert_eq!(
-            status(g.check(&get, &HeaderMap::new(), None)),
+            status(g.check(&get, "/api/x", &HeaderMap::new(), None)),
             StatusCode::FORBIDDEN
         );
         let same = headers(&[
             ("host", "127.0.0.1:8080"),
             ("origin", "http://127.0.0.1:8080"),
         ]);
-        assert_eq!(status(g.check(&Method::POST, &same, None)), StatusCode::OK);
+        assert_eq!(
+            status(g.check(&Method::POST, "/api/x", &same, None)),
+            StatusCode::OK
+        );
         let cross = headers(&[
             ("host", "127.0.0.1:8080"),
             ("origin", "https://evil.example"),
         ]);
         assert_eq!(
-            status(g.check(&Method::POST, &cross, None)),
+            status(g.check(&Method::POST, "/api/x", &cross, None)),
             StatusCode::FORBIDDEN
         );
         assert_eq!(
-            status(g.check(&get, &cross, None)),
+            status(g.check(&get, "/api/x", &cross, None)),
             StatusCode::FORBIDDEN,
             "WebSocket hijack"
         );
@@ -264,12 +310,12 @@ mod tests {
             ("origin", "http://localhost:3000"),
         ]);
         assert_eq!(
-            status(g.check(&Method::POST, &other_port, None)),
+            status(g.check(&Method::POST, "/api/x", &other_port, None)),
             StatusCode::FORBIDDEN
         );
         let null = headers(&[("host", "localhost:8080"), ("origin", "null")]);
         assert_eq!(
-            status(g.check(&Method::POST, &null, None)),
+            status(g.check(&Method::POST, "/api/x", &null, None)),
             StatusCode::FORBIDDEN
         );
     }
@@ -284,13 +330,16 @@ mod tests {
         ] {
             let h = headers(&[("host", "localhost"), ("content-type", ct)]);
             assert_eq!(
-                status(g.check(&Method::POST, &h, None)),
+                status(g.check(&Method::POST, "/api/x", &h, None)),
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 "{ct}"
             );
         }
         let json = headers(&[("host", "localhost"), ("content-type", "application/json")]);
-        assert_eq!(status(g.check(&Method::POST, &json, None)), StatusCode::OK);
+        assert_eq!(
+            status(g.check(&Method::POST, "/api/x", &json, None)),
+            StatusCode::OK
+        );
     }
 
     #[test]
@@ -304,12 +353,13 @@ mod tests {
             headers(&pairs)
         };
         assert_eq!(
-            status(g.check(&Method::GET, &lan(&[]), None)),
+            status(g.check(&Method::GET, "/api/x", &lan(&[]), None)),
             StatusCode::UNAUTHORIZED
         );
         assert_eq!(
             status(g.check(
                 &Method::GET,
+                "/api/x",
                 &lan(&[("authorization", "Bearer s3cret")]),
                 None
             )),
@@ -319,6 +369,7 @@ mod tests {
         assert_eq!(
             status(g.check(
                 &Method::GET,
+                "/api/x",
                 &lan(&[("authorization", "Bearer nope")]),
                 None
             )),
@@ -327,19 +378,20 @@ mod tests {
         assert_eq!(
             status(g.check(
                 &Method::GET,
+                "/api/x",
                 &lan(&[("cookie", "a=b; dlux_token=s3cret")]),
                 None
             )),
             StatusCode::OK
         );
         assert_eq!(
-            g.check(&Method::GET, &lan(&[]), Some("x=1&token=s3cret"))
+            g.check(&Method::GET, "/api/x", &lan(&[]), Some("x=1&token=s3cret"))
                 .unwrap(),
             Some("s3cret".into()),
             "query token sets the cookie"
         );
         assert!(
-            g.check(&Method::GET, &lan(&[]), Some("token=s3cre"))
+            g.check(&Method::GET, "/api/x", &lan(&[]), Some("token=s3cre"))
                 .is_err()
         );
     }
@@ -360,5 +412,26 @@ mod tests {
         assert!(constant_time_eq(b"abc", b"abc"));
         assert!(!constant_time_eq(b"abc", b"abd"));
         assert!(!constant_time_eq(b"abc", b"ab"));
+    }
+
+    #[test]
+    fn the_page_shell_loads_without_a_token() {
+        let g = Guard {
+            token: Some("s3cret".into()),
+        };
+        let h = headers(&[("host", "192.168.1.5:8080")]);
+        assert_eq!(status(g.check(&Method::GET, "/", &h, None)), StatusCode::OK);
+        assert_eq!(
+            status(g.check(&Method::GET, "/assets/app.js", &h, None)),
+            StatusCode::OK
+        );
+        assert_eq!(
+            status(g.check(&Method::GET, "/api/state", &h, None)),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status(g.check(&Method::POST, "/", &h, None)),
+            StatusCode::UNAUTHORIZED
+        );
     }
 }

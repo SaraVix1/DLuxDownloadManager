@@ -6,11 +6,11 @@ use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use dlux_core::limits::{self, Limits, Target};
 use dlux_core::service::{self, FileKind, Service};
-use dlux_core::sources::AddOptions;
-use dlux_core::ytdlp::{DownloadSpec, VideoInfo};
+use dlux_core::sources::{self, AddOptions};
+use dlux_core::ytdlp::{self, DownloadSpec, VideoInfo};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
@@ -149,6 +149,37 @@ pub async fn add(State(ctx): State<Ctx>, Json(body): Json<AddBody>) -> ApiResult
         Json(json!({ "message": summary.message(), "added": added, "failed": failed })),
     )
         .into_response())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CheckBody {
+    pub text: String,
+}
+
+/// What `text` would add, for the Add dialog's live preview: the same parser the TUI uses.
+/// Paths are checked on the server, where aria2 runs.
+pub async fn check_sources(Json(body): Json<CheckBody>) -> Json<serde_json::Value> {
+    let parsed = sources::parse(&body.text);
+    let video = match (parsed.sources.as_slice(), parsed.invalid.is_empty()) {
+        ([sources::Source::Url(u)], true) => ytdlp::looks_like_video(u),
+        _ => false,
+    };
+    let list: Vec<_> = parsed
+        .sources
+        .iter()
+        .map(|s| json!({ "kind": s.kind(), "text": s.to_string() }))
+        .collect();
+    let invalid: Vec<_> = parsed
+        .invalid
+        .iter()
+        .map(|i| json!({ "input": i.input, "reason": i.reason }))
+        .collect();
+    Json(json!({
+        "sources": list,
+        "invalid": invalid,
+        "summary": parsed.summary(),
+        "video": video,
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -385,11 +416,4 @@ pub async fn start_video(
 pub async fn update_ytdlp(State(ctx): State<Ctx>) -> ApiResult<Json<serde_json::Value>> {
     let message = ctx.service.update_ytdlp().await?;
     Ok(Json(json!({ "message": message })))
-}
-
-// ----- index ----------------------------------------------------------------------------------
-
-/// Placeholder until the web frontend (milestone 7) is embedded.
-pub async fn index() -> Html<&'static str> {
-    Html(include_str!("placeholder.html"))
 }

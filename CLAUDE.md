@@ -15,7 +15,8 @@ crates/
   dlux-core/            # library: aria2 JSON-RPC client, aria2 process mgmt, config,
                         # app state, yt-dlp manager, binary manager
   dlux/                 # the `dlux` binary: CLI, TUI front end, web server front end
-web/                    # (milestone 7) Svelte/React + Vite + Tailwind frontend, embedded via rust-embed
+web/                    # Svelte 5 + Vite + Tailwind 4 frontend; `npm --prefix web run build` writes
+                        # crates/dlux/web-dist/ (git-ignored), which crates/dlux/build.rs embeds
 ```
 
 - Binary/command: `dlux`. Binary crate: `dlux` (name was free on crates.io). Library crate: `dlux-core`.
@@ -104,6 +105,9 @@ details. Keyboard too: j/k, a, p, r, d, tab, ?, q.
 - Clean module boundaries (see above). Restore terminal on panic and Ctrl-C.
 - Unit tests for RPC parsing and yt-dlp progress parsing.
 - Before committing: `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
+- Web UI: `npm --prefix web ci && npm --prefix web run build` (zero Svelte warnings), then rebuild
+  dlux to embed it. Without the build, dlux embeds `crates/dlux/fallback.html` and warns.
+  `npm --prefix web run dev` serves it with hot reload, proxying `/api` to `dlux serve` on :8080.
 
 ## Milestones (one PR each; stop after each for review)
 
@@ -113,7 +117,7 @@ details. Keyboard too: j/k, a, p, r, d, tab, ?, q.
 4. [x] Add dialog (URLs, magnets, torrents) and download controls
 5. [x] yt-dlp and ffmpeg integration with the format picker
 6. [x] Web backend (REST + WebSocket)
-7. [ ] Web frontend, embedded in the binary
+7. [x] Web frontend, embedded in the binary
 8. [ ] Packaging, CI/CD, README, release v0.1.0
 
 ## Milestone status / notes
@@ -188,3 +192,17 @@ details. Keyboard too: j/k, a, p, r, d, tab, ?, q.
   shutdown, jobs stopped, spawned aria2 shut down (`with_aria2` takes `Signals::Handled`).
   Integration tests in `web/tests.rs` run the real router against a private aria2 (the test file
   server honours `Range`, or aria2 fails resumed downloads).
+- **M7** (branch `feat/web-frontend`, stacked on `feat/web-backend` until #6 merges): Svelte 5
+  (runes) + Vite 8 + Tailwind 4 in `web/` with the Tokyo Night palette as `@theme` tokens. `lib/`:
+  `api.js` (REST client + reconnecting WebSocket that detects 401), `store.svelte.js` (shared `ui`
+  state, `can()` = the TUI's enable rules), `commands.js` (one command set for keys, toolbar and
+  menu), `format.js` (mirrors `dlux_core::fmt`). Components mirror the TUI: header with clickable
+  speed pills, SVG speed graph, pill tabs, cards (colours as in the TUI, `⋯` menu for touch),
+  details pane (bottom sheet under 1024 px), toolbar, context menu, Add dialog with live preview
+  from `POST /api/sources/check` (the server's parser) and the video picker step, limits / remove
+  / help dialogs, toasts, sign-in screen. Drop files or links anywhere, paste to add, same
+  keyboard shortcuts as the TUI. PWA: manifest, SVG icons, network-first service worker that
+  never caches `/api/`. Backend: `web/assets.rs` serves the embedded files (ETag, immutable cache
+  for `assets/*`, SPA fallback); `guard` lets GETs outside `/api/` through without a token (the
+  shell has no data) and adds CSP / X-Frame-Options / nosniff / no-referrer to every response.
+  Checked in headless Chrome at desktop and phone sizes (no overflow, no console errors).
