@@ -33,7 +33,9 @@ web/                    # (milestone 7) Svelte/React + Vite + Tailwind frontend,
   Unix — aria2 saves its session and exits in ~1 s, while the `aria2.shutdown` RPC lingers ~4 s;
   RPC shutdown on Windows; kill as a last resort).
 - Module split in `dlux-core`: `rpc` (client + types), `aria2` (connect/spawn), `config`, `paths`,
-  `fmt`, `state` (app state, filters, speed history, poller), later `ytdlp`, `binaries`.
+  `fmt`, `state` (app state, filters, speed history, poller), `sources`, `limits`, `binaries`
+  (find/install yt-dlp + ffmpeg), `ytdlp` (probe, format choices, command, output parsing),
+  `jobs` (yt-dlp downloads and tool installs run by dlux itself).
   In `dlux`: `cli`, `status`, `tui` (`app` state/input, `ui` rendering, `theme`, `terminal`), later
   `web`.
 - MSRV: Rust 1.88 (required by ratatui 0.30). Edition 2024.
@@ -108,7 +110,7 @@ details. Keyboard too: j/k, a, p, r, d, tab, ?, q.
 2. [x] TUI layout, theme, live list, speed graph
 3. [x] Complete mouse support and keyboard shortcuts
 4. [x] Add dialog (URLs, magnets, torrents) and download controls
-5. [ ] yt-dlp and ffmpeg integration with the format picker
+5. [x] yt-dlp and ffmpeg integration with the format picker
 6. [ ] Web backend (REST + WebSocket)
 7. [ ] Web frontend, embedded in the binary
 8. [ ] Packaging, CI/CD, README, release v0.1.0
@@ -154,3 +156,22 @@ details. Keyboard too: j/k, a, p, r, d, tab, ?, q.
   `s` per-download limit (also in the context menu), `S` or clicking the header ↓/↑ pills for the
   global limit, shown in the pills as "≤ 2M". Clicking outside a form never discards it. Executor
   messages are `actions::Feedback` (toast or limits).
+- **M5** (branch `feat/ytdlp`): core `binaries` (PATH first, then `~/.local/share/dlux/bin/`;
+  installs yt-dlp from its GitHub releases and ffmpeg+ffprobe from yt-dlp/FFmpeg-Builds,
+  SHA-256-verified against the release checksum file, atomic rename; no prebuilt ffmpeg for
+  macOS), core `ytdlp` (`looks_like_video` heuristic, `yt-dlp -J --flat-playlist` → `VideoInfo`
+  with picker `Choice`s per real height + Best + Audio only and size estimates, download args
+  with `--downloader <aria2c>` and a `DLUX|` progress template, line parser for the template,
+  aria2c's `[#gid a/b(%) CN DL ETA]` readout — what yt-dlp actually prints with aria2c — and
+  Destination/Merger/post-processing/ERROR lines, `friendly_error`, `progressive()` fallback when
+  ffmpeg is unavailable) and core `jobs::JobManager` (local jobs presented as `Download`s with
+  GID `dlux-N`; yt-dlp runs in its own process group so pause/quit SIGTERM also stops its aria2c;
+  resume restarts yt-dlp, which continues `.part` files; tool installs are jobs with progress).
+  `AppState::local` merges jobs into tabs, counts and the speed graph. Output names include the
+  quality (`… [id] 720p.mp4`, `… audio.webm`) so a second quality isn't skipped as "already
+  downloaded". TUI: Add dialog auto-switches to Video mode for a single video-looking URL
+  (checkbox to override) → "Download video" picker (spinner while probing; click / double-click
+  / ↑↓ Enter; Retry, Download as file for unsupported pages, Update yt-dlp); cards tagged
+  `video` / `tool` with job notes (merging, stream 2, item 3/23, already on disk); `U` updates
+  yt-dlp. Known limits: YouTube now wants a JS runtime (deno) for all formats; aria2c gets one
+  connection on small streams.

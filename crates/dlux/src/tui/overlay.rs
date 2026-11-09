@@ -24,6 +24,7 @@ const HELP_KEYS: &[(&str, &str)] = &[
     ("d  Del", "remove"),
     ("X", "clear finished"),
     ("s  S", "speed limit / global speed limit"),
+    ("U", "update yt-dlp"),
     ("o  c", "open folder / copy URL"),
     ("m", "context menu"),
     ("?  q  Esc", "help / quit (Esc closes popups)"),
@@ -197,12 +198,13 @@ fn render_dialog(buf: &mut Buffer, app: &mut App) {
     let screen = buf.area;
     let t = app.theme;
     match dialog {
-        Dialog::Add(_) | Dialog::Limits(_) => {
+        Dialog::Add(_) | Dialog::Limits(_) | Dialog::Video(_) => {
             // Forms keep scroll state, so render the real one (not a copy).
             let mut dialog = app.dialog.take();
             match dialog.as_mut() {
                 Some(Dialog::Add(form)) => forms::render_add(buf, app, form),
                 Some(Dialog::Limits(form)) => forms::render_limits(buf, app, form),
+                Some(Dialog::Video(form)) => forms::render_video(buf, app, form),
                 _ => {}
             }
             app.dialog = dialog;

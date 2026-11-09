@@ -141,6 +141,8 @@ impl SpeedHistory {
 #[derive(Debug, Clone, Default)]
 pub struct AppState {
     pub snapshot: Snapshot,
+    /// Downloads dlux runs itself (yt-dlp videos, tool installs), shown alongside aria2's.
+    pub local: Vec<Download>,
     pub history: SpeedHistory,
     /// Last poll error, cleared by the next successful poll.
     pub error: Option<String>,
@@ -151,9 +153,9 @@ pub struct AppState {
 impl AppState {
     /// Apply a fresh snapshot and record the global speeds.
     pub fn apply(&mut self, snapshot: Snapshot) {
-        self.history
-            .push(snapshot.stat.download_speed, snapshot.stat.upload_speed);
         self.snapshot = snapshot;
+        self.history
+            .push(self.download_speed(), self.upload_speed());
         self.error = None;
         self.loaded = true;
     }
@@ -168,7 +170,7 @@ impl AppState {
     /// Record a failed poll. The graph keeps moving (with zero speed) so it stays in sync with
     /// wall-clock time.
     pub fn apply_error(&mut self, error: String) {
-        self.history.push(0, 0);
+        self.history.push(self.local_speed(), 0);
         self.error = Some(error);
     }
 
@@ -184,14 +186,37 @@ impl AppState {
         &self.snapshot.stat
     }
 
+    /// Replace the local jobs (they are polled separately from aria2).
+    pub fn set_local(&mut self, local: Vec<Download>) {
+        self.local = local;
+    }
+
+    fn local_speed(&self) -> u64 {
+        self.local.iter().map(|d| d.download_speed).sum()
+    }
+
+    /// Total download speed: aria2 plus local jobs.
+    pub fn download_speed(&self) -> u64 {
+        self.snapshot.stat.download_speed + self.local_speed()
+    }
+
+    pub fn upload_speed(&self) -> u64 {
+        self.snapshot.stat.upload_speed
+    }
+
+    /// Every download: local jobs first, then aria2's.
+    pub fn all(&self) -> impl Iterator<Item = &Download> {
+        self.local.iter().chain(self.snapshot.iter())
+    }
+
     /// Downloads under `filter`, in display order.
     pub fn downloads(&self, filter: Filter) -> Vec<&Download> {
-        self.snapshot.iter().filter(|d| filter.matches(d)).collect()
+        self.all().filter(|d| filter.matches(d)).collect()
     }
 
     pub fn counts(&self) -> Counts {
         let mut c = Counts::default();
-        for d in self.snapshot.iter() {
+        for d in self.all() {
             match Filter::ALL.into_iter().find(|f| f.matches(d)) {
                 Some(Filter::Active) => c.active += 1,
                 Some(Filter::Waiting) => c.waiting += 1,
@@ -203,7 +228,7 @@ impl AppState {
     }
 
     pub fn find(&self, gid: &str) -> Option<&Download> {
-        self.snapshot.find(gid)
+        self.all().find(|d| d.gid == gid)
     }
 }
 
@@ -382,5 +407,25 @@ mod tests {
         assert_eq!(state.history.len(), 1);
         assert_eq!(state.counts().total(), 0);
         assert!(state.loaded);
+    }
+
+    #[test]
+    fn local_jobs_are_listed_and_counted() {
+        let mut state = AppState::default();
+        state.set_local(vec![Download {
+            download_speed: 500,
+            ..dl("dlux-1", DownloadStatus::Active)
+        }]);
+        state.apply(snapshot());
+        let active: Vec<_> = state
+            .downloads(Filter::Active)
+            .iter()
+            .map(|d| d.gid.as_str())
+            .collect();
+        assert_eq!(active, vec!["dlux-1", "a"], "local jobs first");
+        assert_eq!(state.counts().active, 2);
+        assert!(state.find("dlux-1").is_some());
+        assert_eq!(state.download_speed(), 1500);
+        assert_eq!(state.history.peak(), 1500, "the graph includes local jobs");
     }
 }

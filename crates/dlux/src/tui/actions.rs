@@ -4,10 +4,12 @@
 
 use super::app::Action;
 use base64::Engine;
+use dlux_core::jobs::{self, JobManager};
 use dlux_core::limits::{self, Limits, Target};
 use dlux_core::paths;
 use dlux_core::rpc::Client;
 use dlux_core::sources::{self, AddOptions, Source};
+use dlux_core::ytdlp::VideoInfo;
 use std::io::Write;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -22,6 +24,11 @@ pub enum Feedback {
     Toast { text: String, error: bool },
     /// Current speed limits, after loading or changing them.
     Limits(Target, Limits),
+    /// The formats of a video page (or why they could not be read).
+    Probe {
+        url: String,
+        result: Result<VideoInfo, String>,
+    },
 }
 
 impl Feedback {
@@ -42,6 +49,8 @@ impl Feedback {
 
 pub struct Executor {
     pub client: Client,
+    /// yt-dlp downloads and tool installs.
+    pub jobs: JobManager,
     /// Ask the poller for a fresh snapshot once an aria2 call succeeded.
     pub refresh: Arc<Notify>,
     pub feedback: mpsc::UnboundedSender<Feedback>,
@@ -50,9 +59,31 @@ pub struct Executor {
 impl Executor {
     /// Start `action`. `terminal` is where the OSC 52 clipboard sequence is written.
     pub fn run(&self, action: Action, terminal: &mut impl Write) {
+        if self.run_local(&action) {
+            return;
+        }
         let c = self.client.clone();
         let tx = self.feedback.clone();
         match action {
+            Action::Probe(url) => {
+                let jobs = self.jobs.clone();
+                tokio::spawn(async move {
+                    let result = jobs.probe(&url).await;
+                    let _ = tx.send(Feedback::Probe { url, result });
+                });
+            }
+            Action::StartVideo(spec) => {
+                self.jobs.start_video(spec);
+            }
+            Action::UpdateYtDlp => {
+                let jobs = self.jobs.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(match jobs.update_ytdlp().await {
+                        Ok(msg) => Feedback::ok(msg),
+                        Err(e) => Feedback::err(e),
+                    });
+                });
+            }
             Action::Pause(gid) => {
                 self.rpc("pause", None, async move { c.pause(&gid).await.map(drop) })
             }
@@ -147,6 +178,32 @@ impl Executor {
                     let _ = tx.send(Feedback::ok(msg));
                 });
             }
+        }
+    }
+
+    /// Handle `action` for local jobs. Returns true when it was only about a local job; "all"
+    /// actions apply to local jobs and then continue to aria2.
+    fn run_local(&self, action: &Action) -> bool {
+        let local = |gid: &str| jobs::local_id(gid);
+        match action {
+            Action::Pause(gid) => local(gid).map(|id| self.jobs.pause(id)).is_some(),
+            Action::Resume(gid) => local(gid).map(|id| self.jobs.resume(id)).is_some(),
+            Action::Remove(gid) | Action::RemoveResult(gid) => {
+                local(gid).map(|id| self.jobs.remove(id)).is_some()
+            }
+            Action::PauseAll => {
+                self.jobs.pause_all();
+                false
+            }
+            Action::ResumeAll => {
+                self.jobs.resume_all();
+                false
+            }
+            Action::Purge => {
+                self.jobs.purge();
+                false
+            }
+            _ => false,
         }
     }
 
