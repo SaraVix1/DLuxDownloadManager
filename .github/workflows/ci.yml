@@ -31,7 +31,7 @@ jobs:
         run: |
           npm --prefix web run build 2>&1 | tee build.log
           if grep -q "svelte.dev/e/" build.log; then echo "::error::Svelte warnings (see above)"; exit 1; fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: web-dist
           path: crates/dlux/web-dist
