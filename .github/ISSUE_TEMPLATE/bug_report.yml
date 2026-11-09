@@ -1,0 +1,43 @@
+name: Bug report
+description: Something doesn't work as it should
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where
+      options: [Terminal UI, Web UI, Both, Command line (dlux status / config)]
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run `dlux`
+        2. Press `a` and paste …
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: "`dlux --version`, `aria2c --version | head -1`, and yt-dlp if it's about videos"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and terminal / browser
+      placeholder: e.g. Debian 13, kitty 0.39 / Firefox 140
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Run with `-vv` (the TUI logs to ~/.local/share/dlux/dlux.log). Remove anything private.
+      render: text

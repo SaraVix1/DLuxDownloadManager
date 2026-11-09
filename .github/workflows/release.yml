@@ -1,0 +1,151 @@
+name: Release
+
+# Push a tag like v0.1.0 (matching the version in Cargo.toml) to build and publish a release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check-version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        name: Tag must match the workspace version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $crate"; exit 1
+          fi
+          echo "version=$crate" >> "$GITHUB_OUTPUT"
+
+  web:
+    needs: check-version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm --prefix web ci
+      - run: npm --prefix web run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: crates/dlux/web-dist
+
+  build:
+    needs: [check-version, web]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Built on Ubuntu 22.04 so the binaries run on glibc 2.35+ (Debian 12, Ubuntu 22.04…).
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04, deb: true }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm, deb: true }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest, deb: false }
+    runs-on: ${{ matrix.os }}
+    env:
+      NAME: dlux-${{ needs.check-version.outputs.version }}-${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: crates/dlux/web-dist
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }} -p dlux
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p "dist/$NAME"
+          cp "target/${{ matrix.target }}/release/dlux" README.md LICENSE packaging/systemd/dlux.service "dist/$NAME/"
+          tar -C dist -czf "dist/$NAME.tar.gz" "$NAME"
+          rm -r "dist/$NAME"
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "dist/$env:NAME" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/dlux.exe", README.md, LICENSE "dist/$env:NAME/"
+          Compress-Archive -Path "dist/$env:NAME" -DestinationPath "dist/$env:NAME.zip"
+          Remove-Item -Recurse "dist/$env:NAME"
+
+      - name: Debian package
+        if: matrix.deb
+        run: |
+          cargo install --locked cargo-deb
+          cargo deb --no-build --target ${{ matrix.target }} -p dlux
+          cp target/${{ matrix.target }}/debian/*.deb dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+
+  github-release:
+    needs: [check-version, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+      - name: Release notes
+        uses: orhun/git-cliff-action@v4
+        id: notes
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: dlux ${{ needs.check-version.outputs.version }}
+          body: ${{ steps.notes.outputs.content }}
+          files: dist/*
+
+  crates-io:
+    needs: [check-version, build]
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - name: Skip without a crates.io token
+        if: env.CARGO_REGISTRY_TOKEN == ''
+        run: echo "::notice::CARGO_REGISTRY_TOKEN is not set; not publishing to crates.io"
+      - uses: actions/checkout@v4
+        if: env.CARGO_REGISTRY_TOKEN != ''
+      - uses: actions/download-artifact@v4
+        if: env.CARGO_REGISTRY_TOKEN != ''
+        with:
+          name: web-dist
+          path: crates/dlux/web-dist
+      - uses: dtolnay/rust-toolchain@stable
+        if: env.CARGO_REGISTRY_TOKEN != ''
+      - name: Publish dlux-core, then dlux
+        if: env.CARGO_REGISTRY_TOKEN != ''
+        # --allow-dirty: the built web UI (web-dist/) is untracked but must be in the package.
+        run: |
+          cargo publish --locked -p dlux-core
+          cargo publish --locked -p dlux --allow-dirty

@@ -118,7 +118,7 @@ details. Keyboard too: j/k, a, p, r, d, tab, ?, q.
 5. [x] yt-dlp and ffmpeg integration with the format picker
 6. [x] Web backend (REST + WebSocket)
 7. [x] Web frontend, embedded in the binary
-8. [ ] Packaging, CI/CD, README, release v0.1.0
+8. [x] Packaging, CI/CD, README, release v0.1.0 (tag `v0.1.0` after merging to cut the release)
 
 ## Milestone status / notes
 
@@ -206,3 +206,20 @@ details. Keyboard too: j/k, a, p, r, d, tab, ?, q.
   for `assets/*`, SPA fallback); `guard` lets GETs outside `/api/` through without a token (the
   shell has no data) and adds CSP / X-Frame-Options / nosniff / no-referrer to every response.
   Checked in headless Chrome at desktop and phone sizes (no overflow, no console errors).
+- **M8** (branch `feat/release`, stacked on `feat/web-frontend`): `.github/workflows/ci.yml` (web
+  build failing on Svelte warnings → artifact; Linux fmt/clippy/test with aria2 installed so the
+  integration tests run; Windows build+test; MSRV 1.88 `cargo check`), `release.yml` on `v*` tags
+  (tag must equal the workspace version; web build once; Linux x86_64/aarch64 on native Ubuntu
+  22.04 runners for glibc 2.35+, Windows x86_64; `.tar.gz`/`.zip` + `.deb` via cargo-deb;
+  SHA256SUMS; GitHub release with git-cliff notes; crates.io publish of dlux-core then dlux,
+  skipped without the `CARGO_REGISTRY_TOKEN` secret), Dependabot (cargo, npm, actions).
+  `crates/dlux/Cargo.toml`: explicit `include` (ships `web-dist/`, so `cargo publish -p dlux` needs
+  `--allow-dirty`) and `[package.metadata.deb]` (depends aria2, recommends ffmpeg; installs
+  `packaging/systemd/dlux.service` as a user unit). liblzma is linked statically (feature `static`)
+  so the binary needs only glibc. `cliff.toml` + generated `CHANGELOG.md`; README rewritten
+  (install, usage, key/mouse tables, web security, config, systemd, troubleshooting) with
+  screenshots in `docs/screenshots/` (TUI captured from tmux and rendered through Chrome, web via
+  playwright). CONTRIBUTING, CODE_OF_CONDUCT (Contributor Covenant 2.1 by reference — reporting
+  contact still a placeholder), SECURITY, issue forms, PR template. Verified locally: MSRV check,
+  release build, `.deb` contents, `cargo package -p dlux-core`, package file list of dlux. Not
+  verifiable here: the workflows themselves (no actionlint) and the Windows build.

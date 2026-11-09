@@ -11,6 +11,16 @@ repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
+# The built web UI (web-dist/, git-ignored) must be in the published crate, so list the files
+# explicitly instead of relying on .gitignore.
+include = [
+    "Cargo.toml",
+    "build.rs",
+    "src/**/*",
+    "fallback.html",
+    "fallback.js",
+    "web-dist/**/*",
+]
 
 [[bin]]
 name = "dlux"
@@ -42,3 +52,22 @@ futures-util = { version = "0.3.34", default-features = false, features = ["sink
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
 tempfile = "3.27.0"
 tokio-tungstenite = "0.30.0"
+
+# `cargo deb` (https://github.com/kornelski/cargo-deb). Build the web UI first.
+[package.metadata.deb]
+maintainer = "SaraVix1 <SaraVix1@users.noreply.github.com>"
+copyright = "2026, SaraVix1 and dlux contributors"
+license-file = ["../../LICENSE", "0"]
+extended-description = """\
+dlux is a modern download manager for aria2 with a fully mouse-driven terminal UI \
+and a web UI. It handles HTTP(S), FTP, BitTorrent, magnet and Metalink downloads, \
+and video sites through yt-dlp."""
+section = "net"
+priority = "optional"
+depends = "$auto, aria2"
+recommends = "ffmpeg"
+assets = [
+    ["target/release/dlux", "usr/bin/", "755"],
+    ["../../packaging/systemd/dlux.service", "usr/lib/systemd/user/", "644"],
+    ["../../README.md", "usr/share/doc/dlux/README.md", "644"],
+]

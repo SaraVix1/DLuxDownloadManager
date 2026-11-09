@@ -1,0 +1,27 @@
+# systemd *user* unit: run the dlux web UI in the background for your account.
+#
+#   systemctl --user enable --now dlux        # start now and at login
+#   journalctl --user -u dlux -f              # logs
+#
+# The .deb installs this to /usr/lib/systemd/user/. With `cargo install`, copy it to
+# ~/.config/systemd/user/dlux.service and change ExecStart to %h/.cargo/bin/dlux.
+# To keep it running while you're logged out: `loginctl enable-linger $USER`.
+
+[Unit]
+Description=dlux web UI (aria2 download manager)
+Documentation=https://github.com/SaraVix1/DLuxDownloadManager
+
+[Service]
+Type=simple
+# Listens on 127.0.0.1:8080. To reach it from other machines, set `token` under [web] in
+# ~/.config/dlux/config.toml and add `--bind 0.0.0.0`.
+ExecStart=/usr/bin/dlux serve
+# On SIGTERM dlux stops its video downloads and the aria2 it started, then exits.
+KillSignal=SIGTERM
+TimeoutStopSec=15
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
