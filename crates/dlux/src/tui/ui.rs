@@ -4,6 +4,7 @@
 use super::app::{App, Command, HitMap};
 use super::overlay;
 use super::theme::Theme;
+use dlux_core::jobs::{Job, JobKind};
 use dlux_core::rpc::{Download, DownloadStatus};
 use dlux_core::state::Filter;
 use dlux_core::{fmt, limits};
@@ -603,7 +604,7 @@ fn render_list(buf: &mut Buffer, app: &mut App, area: Rect) {
         let rect = Rect::new(inner.x, y, inner.width, CARD_HEIGHT).intersection(inner);
         let is_selected = selected.as_deref() == Some(d.gid.as_str());
         let hover = !is_selected && hovered(app, rect);
-        render_card(buf, rect, d, is_selected, hover, &t);
+        render_card(buf, rect, d, app.job(&d.gid), is_selected, hover, &t);
         cards.push((rect, d.gid.clone()));
     }
     app.hits.cards = cards;
@@ -633,7 +634,15 @@ fn render_list(buf: &mut Buffer, app: &mut App, area: Rect) {
     }
 }
 
-fn render_card(buf: &mut Buffer, area: Rect, d: &Download, selected: bool, hover: bool, t: &Theme) {
+fn render_card(
+    buf: &mut Buffer,
+    area: Rect,
+    d: &Download,
+    job: Option<&Job>,
+    selected: bool,
+    hover: bool,
+    t: &Theme,
+) {
     if area.is_empty() {
         return;
     }
@@ -667,6 +676,11 @@ fn render_card(buf: &mut Buffer, area: Rect, d: &Download, selected: bool, hover
     }
     if d.is_metadata() {
         tags.push(Span::styled(" magnet", Style::new().fg(t.purple)));
+    }
+    match job.map(|j| j.kind) {
+        Some(JobKind::Video) => tags.push(Span::styled(" video", Style::new().fg(t.magenta))),
+        Some(JobKind::Install(_)) => tags.push(Span::styled(" tool", Style::new().fg(t.cyan))),
+        None => {}
     }
     let right_w = percent.width() + 1;
     let tags_w = usize::from(spans_width(&tags));
@@ -725,7 +739,9 @@ fn render_card(buf: &mut Buffer, area: Rect, d: &Download, selected: bool, hover
         let y = content.y + 2;
         put_line(buf, content.x, y, meta, content.width);
         if status_max >= 6 {
-            let status = truncate(&status_text(d), status_max);
+            // Jobs explain what yt-dlp is doing ("merging", "item 3/23").
+            let text = job.and_then(Job::note).unwrap_or_else(|| status_text(d));
+            let status = truncate(&text, status_max);
             put_right(
                 buf,
                 content,
@@ -794,7 +810,11 @@ fn render_details(buf: &mut Buffer, app: &App, area: Rect) {
     if d.status == DownloadStatus::Active && !d.seeder {
         lines.push(row("ETA", &fmt::eta(d.eta())));
     }
-    lines.push(row("Connections", &d.connections.to_string()));
+    match app.job(&d.gid).map(|j| j.kind) {
+        Some(JobKind::Video) => lines.push(row("Via", "yt-dlp (with aria2c)")),
+        Some(JobKind::Install(_)) => lines.push(row("Via", "dlux tool installer")),
+        None => lines.push(row("Connections", &d.connections.to_string())),
+    }
     if d.is_torrent() {
         let seeds = if d.seeder {
             format!("{} (seeding)", d.num_seeders)
@@ -1242,7 +1262,7 @@ mod tests {
         ] {
             assert!(screen.contains(needle), "missing {needle:?}:\n{screen}");
         }
-        assert_eq!(app.hits.fields.len(), 3);
+        assert_eq!(app.hits.fields.len(), 4, "URLs, dir and two checkboxes");
         assert_eq!(app.hits.dialog_buttons.len(), 2);
 
         app.dialog = None;
@@ -1267,5 +1287,59 @@ mod tests {
             app.open_add("x");
             draw(&mut app, w, h);
         }
+    }
+
+    #[test]
+    fn renders_video_picker_and_video_cards() {
+        use crate::tui::app::Dialog;
+        use crate::tui::forms::VideoForm;
+        let mut app = sample_app();
+        let mut form = VideoForm::new("https://youtu.be/x".into(), "/home/user/Videos".into());
+        let screen = {
+            app.dialog = Some(Dialog::Video(form.clone()));
+            draw(&mut app, 100, 30)
+        };
+        assert!(screen.contains("Fetching formats with yt-dlp"), "{screen}");
+        assert!(screen.contains(" Update yt-dlp "));
+        form.info = Some(
+            dlux_core::ytdlp::parse_probe(
+                "https://youtu.be/x",
+                br#"{"title":"Me at the zoo","extractor_key":"Youtube","duration":19,
+                     "formats":[{"format_id":"18","ext":"mp4","height":360,"vcodec":"avc1","acodec":"mp4a","filesize":800000}]}"#,
+            )
+            .unwrap(),
+        );
+        app.dialog = Some(Dialog::Video(form));
+        let screen = draw(&mut app, 100, 30);
+        for needle in [
+            "Download video",
+            "Me at the zoo",
+            "Youtube · 0:19",
+            "● Best quality (360p)",
+            "mp4 · ~781 KiB",
+            "/home/user/Videos",
+            " Download ",
+        ] {
+            assert!(screen.contains(needle), "missing {needle:?}:\n{screen}");
+        }
+        assert_eq!(app.hits.choices.len(), 1);
+        for (w, h) in [(30, 8), (60, 14)] {
+            draw(&mut app, w, h);
+        }
+
+        // A running yt-dlp job is listed with a video tag and its stage.
+        app.dialog = None;
+        let mut job_download = Download {
+            gid: "dlux-1".into(),
+            status: DownloadStatus::Active,
+            ..Default::default()
+        };
+        job_download.files = vec![File {
+            path: "/home/user/Videos/Me at the zoo".into(),
+            ..Default::default()
+        }];
+        app.state.set_local(vec![job_download]);
+        let screen = draw(&mut app, 140, 45);
+        assert!(screen.contains("Me at the zoo"), "{screen}");
     }
 }

@@ -5,12 +5,14 @@
 //! [`Command`]s that keys, toolbar buttons, menu items and hints all map to.
 
 use super::actions::Feedback;
-use super::forms::{AddForm, Field, Form, LimitsForm};
+use super::forms::{AddForm, AddRequest, Field, Form, LimitsForm, VideoForm};
 use super::theme::Theme;
+use dlux_core::jobs::{self, Job};
 use dlux_core::limits::{Limits, Target};
 use dlux_core::rpc::{Download, DownloadStatus, Gid};
 use dlux_core::sources::{AddOptions, Source};
 use dlux_core::state::{AppState, Filter};
+use dlux_core::ytdlp::DownloadSpec;
 use ratatui::layout::{Position, Rect};
 use std::time::{Duration, Instant};
 
@@ -40,6 +42,8 @@ pub struct HitMap {
     pub dialog_buttons: Vec<(Rect, DialogButton)>,
     /// Form controls: clickable area, the field, and where its text is drawn.
     pub fields: Vec<(Rect, Field, Rect)>,
+    /// Rows of the video format picker.
+    pub choices: Vec<(Rect, usize)>,
     /// The ↓/↑ speed pills in the header (click to set the global limit).
     pub speed: Option<Rect>,
     /// Whether the terminal is wide enough to show the details pane by default.
@@ -103,6 +107,7 @@ pub enum Command {
     Purge,
     SpeedLimit,
     GlobalLimit,
+    UpdateYtDlp,
     OpenFolder,
     CopyUrl,
     Details,
@@ -143,6 +148,7 @@ impl Command {
             Self::Purge => "Clear finished",
             Self::SpeedLimit => "Speed limit…",
             Self::GlobalLimit => "Global speed limit…",
+            Self::UpdateYtDlp => "Update yt-dlp",
             Self::OpenFolder => "Open folder",
             Self::CopyUrl => "Copy URL",
             Self::Details => "Details",
@@ -164,6 +170,7 @@ impl Command {
             Self::Purge => "X",
             Self::SpeedLimit => "s",
             Self::GlobalLimit => "S",
+            Self::UpdateYtDlp => "U",
             Self::OpenFolder => "o",
             Self::CopyUrl => "c",
             Self::Details => "enter",
@@ -179,11 +186,19 @@ impl Command {
         match self {
             Self::Add | Self::Details | Self::Help | Self::Quit => true,
             Self::PauseAll | Self::ResumeAll | Self::Purge | Self::GlobalLimit => true,
-            Self::SpeedLimit => selected.is_some_and(|d| !d.status.is_stopped()),
+            Self::UpdateYtDlp => true,
+            // yt-dlp jobs run their own aria2c, which dlux can't limit per download.
+            Self::SpeedLimit => {
+                selected.is_some_and(|d| !d.status.is_stopped() && !jobs::is_local(&d.gid))
+            }
             Self::Pause => selected.is_some_and(|d| {
                 matches!(d.status, DownloadStatus::Active | DownloadStatus::Waiting)
             }),
-            Self::Resume => selected.is_some_and(|d| d.status == DownloadStatus::Paused),
+            // A failed video can be retried: yt-dlp continues where it stopped.
+            Self::Resume => selected.is_some_and(|d| {
+                d.status == DownloadStatus::Paused
+                    || (d.status == DownloadStatus::Error && jobs::is_local(&d.gid))
+            }),
             Self::Remove | Self::Menu => selected.is_some(),
             Self::OpenFolder => selected.is_some_and(|d| !d.dir.is_empty()),
             Self::CopyUrl => selected.and_then(copy_text).is_some(),
@@ -223,6 +238,10 @@ pub enum Action {
     Purge,
     LoadLimits(Target),
     SetLimits(Target, Limits),
+    /// Ask yt-dlp for the page's formats.
+    Probe(String),
+    StartVideo(DownloadSpec),
+    UpdateYtDlp,
 }
 
 /// A modal dialog.
@@ -232,6 +251,7 @@ pub enum Dialog {
     ConfirmRemove { gid: Gid, name: String },
     Add(AddForm),
     Limits(LimitsForm),
+    Video(VideoForm),
 }
 
 impl Dialog {
@@ -240,7 +260,7 @@ impl Dialog {
         match self {
             Self::Add(f) => Some(f),
             Self::Limits(f) => Some(f),
-            Self::Help | Self::ConfirmRemove { .. } => None,
+            Self::Help | Self::ConfirmRemove { .. } | Self::Video(_) => None,
         }
     }
 }
@@ -250,6 +270,10 @@ impl Dialog {
 pub enum DialogButton {
     Confirm,
     Cancel,
+    /// Video picker: add the URL to aria2 as a plain file instead.
+    Fallback,
+    /// Video picker: run `yt-dlp -U`.
+    UpdateYtDlp,
 }
 
 /// An open context menu for one download.
@@ -305,6 +329,10 @@ pub struct App {
     pub default_dir: String,
     /// Global speed limits, once known.
     pub global_limits: Option<Limits>,
+    /// Local jobs (yt-dlp videos, tool installs), for card tags and status notes.
+    pub jobs: Vec<Job>,
+    /// Last click on a format-picker row, for double-click.
+    pub last_choice_click: Option<(Instant, usize)>,
     pub should_quit: bool,
 }
 
@@ -331,6 +359,8 @@ impl App {
             actions: Vec::new(),
             default_dir: String::new(),
             global_limits: None,
+            jobs: Vec::new(),
+            last_choice_click: None,
             should_quit: false,
         }
     }
@@ -523,9 +553,36 @@ impl App {
         self.actions.push(Action::LoadLimits(target));
     }
 
+    /// Replace the local jobs (polled from the job manager).
+    pub fn set_jobs(&mut self, jobs: Vec<Job>) {
+        self.state
+            .set_local(jobs.iter().rev().map(Job::to_download).collect());
+        self.jobs = jobs;
+    }
+
+    /// The local job behind `gid`, if it is one.
+    pub fn job(&self, gid: &str) -> Option<&Job> {
+        let id = jobs::local_id(gid)?;
+        self.jobs.iter().find(|j| j.id == id)
+    }
+
     /// Apply a message from the action executor.
     pub fn on_feedback(&mut self, feedback: Feedback) {
         match feedback {
+            Feedback::Probe { url, result } => {
+                if let Some(Dialog::Video(form)) = &mut self.dialog
+                    && form.url == url
+                {
+                    match result {
+                        Ok(info) => {
+                            form.info = Some(info);
+                            form.error = None;
+                            form.cursor = 0;
+                        }
+                        Err(e) => form.error = Some(e),
+                    }
+                }
+            }
             Feedback::Toast { text, error } => self.notify(text, error),
             Feedback::Limits(target, limits) => {
                 if target == Target::Global {
@@ -558,6 +615,10 @@ impl App {
                 self.open_limits(Target::Download(gid()), name);
             }
             Command::GlobalLimit => self.open_limits(Target::Global, "All downloads".into()),
+            Command::UpdateYtDlp => {
+                self.actions.push(Action::UpdateYtDlp);
+                self.notify("Updating yt-dlp…", false);
+            }
             Command::Pause => self.actions.push(Action::Pause(gid())),
             Command::Resume => self.actions.push(Action::Resume(gid())),
             Command::Remove => {
@@ -609,8 +670,9 @@ impl App {
         match dialog {
             Dialog::Help => {}
             Dialog::ConfirmRemove { gid, .. } => self.actions.push(Action::Remove(gid)),
+            Dialog::Video(form) => self.press_video(form, button),
             Dialog::Add(mut form) => match form.submit() {
-                Ok((sources, options)) => {
+                Ok(AddRequest::Files(sources, options)) => {
                     let paused = options.paused;
                     self.actions.push(Action::Add { sources, options });
                     self.set_filter(if paused {
@@ -618,6 +680,10 @@ impl App {
                     } else {
                         Filter::Active
                     });
+                }
+                Ok(AddRequest::Video { url, dir }) => {
+                    self.actions.push(Action::Probe(url.clone()));
+                    self.dialog = Some(Dialog::Video(VideoForm::new(url, dir)));
                 }
                 Err(e) => {
                     form.error = Some(e);
@@ -630,6 +696,42 @@ impl App {
                     form.error = Some(e);
                     self.dialog = Some(Dialog::Limits(form));
                 }
+            },
+        }
+    }
+
+    fn press_video(&mut self, mut form: VideoForm, button: DialogButton) {
+        match button {
+            DialogButton::Cancel => {}
+            DialogButton::UpdateYtDlp => {
+                self.actions.push(Action::UpdateYtDlp);
+                self.notify("Updating yt-dlp…", false);
+                self.dialog = Some(Dialog::Video(form));
+            }
+            DialogButton::Fallback => {
+                let dir = form.dir.trim().to_owned();
+                self.actions.push(Action::Add {
+                    sources: vec![Source::Url(form.url)],
+                    options: AddOptions {
+                        dir: (!dir.is_empty()).then_some(dir),
+                        paused: false,
+                    },
+                });
+                self.set_filter(Filter::Active);
+            }
+            DialogButton::Confirm if form.error.is_some() => {
+                // Retry, e.g. after updating yt-dlp.
+                form.error = None;
+                self.actions.push(Action::Probe(form.url.clone()));
+                self.dialog = Some(Dialog::Video(form));
+            }
+            DialogButton::Confirm => match form.spec() {
+                Some(spec) => {
+                    self.actions.push(Action::StartVideo(spec));
+                    self.set_filter(Filter::Active);
+                }
+                // Still loading: keep waiting.
+                None => self.dialog = Some(Dialog::Video(form)),
             },
         }
     }

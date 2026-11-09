@@ -59,6 +59,22 @@ impl App {
         if self.dialog.as_mut().is_some_and(|d| d.form().is_some()) {
             return self.form_key(key);
         }
+        if let Some(Dialog::Video(form)) = self.dialog.as_mut() {
+            let unsupported = form.unsupported();
+            let button = match key.code {
+                KeyCode::Char('j') | KeyCode::Down | KeyCode::Tab => return form.move_cursor(1),
+                KeyCode::Char('k') | KeyCode::Up | KeyCode::BackTab => return form.move_cursor(-1),
+                KeyCode::Home | KeyCode::Char('g') => return form.move_cursor(isize::MIN),
+                KeyCode::End | KeyCode::Char('G') => return form.move_cursor(isize::MAX),
+                KeyCode::Enter if unsupported => DialogButton::Fallback,
+                KeyCode::Char('f') if unsupported => DialogButton::Fallback,
+                KeyCode::Enter => DialogButton::Confirm,
+                KeyCode::Char('u' | 'U') => DialogButton::UpdateYtDlp,
+                KeyCode::Esc | KeyCode::Char('q') => DialogButton::Cancel,
+                _ => return,
+            };
+            return self.press_dialog(button);
+        }
         let confirm = matches!(self.dialog, Some(Dialog::ConfirmRemove { .. }));
         let button = match key.code {
             KeyCode::Char('y') | KeyCode::Enter if confirm => DialogButton::Confirm,
@@ -140,6 +156,7 @@ impl App {
             KeyCode::Char('X') => Command::Purge,
             KeyCode::Char('s') => Command::SpeedLimit,
             KeyCode::Char('S') => Command::GlobalLimit,
+            KeyCode::Char('U') => Command::UpdateYtDlp,
             KeyCode::Char('o') => Command::OpenFolder,
             KeyCode::Char('c') => Command::CopyUrl,
             KeyCode::Char('m') | KeyCode::Menu => Command::Menu,
@@ -207,8 +224,23 @@ impl App {
     fn left_click(&mut self, pos: Position, now: Instant) {
         if let Some(dialog) = self.dialog.as_mut() {
             let inside = self.hits.dialog.is_some_and(|r| r.contains(pos));
+            let choice = self
+                .hits
+                .choices
+                .iter()
+                .find(|(r, _)| r.contains(pos))
+                .map(|(_, i)| *i);
             if let Some(button) = self.hits.dialog_button_at(pos) {
                 self.press_dialog(button);
+            } else if let (Some(i), Dialog::Video(form)) = (choice, &mut *dialog) {
+                form.cursor = i;
+                let double = self
+                    .last_choice_click
+                    .is_some_and(|(t, c)| c == i && now.duration_since(t) <= DOUBLE_CLICK);
+                self.last_choice_click = if double { None } else { Some((now, i)) };
+                if double {
+                    self.press_dialog(DialogButton::Confirm);
+                }
             } else if let (Some(form), Some((field, text_area))) =
                 (dialog.form(), self.hits.field_at(pos))
             {
@@ -272,6 +304,10 @@ impl App {
     }
 
     fn wheel(&mut self, pos: Position, delta: isize) {
+        if let Some(Dialog::Video(form)) = self.dialog.as_mut() {
+            form.move_cursor(delta);
+            return;
+        }
         if self.dialog.is_some() {
             return;
         }
@@ -296,6 +332,7 @@ mod tests {
     use super::*;
     use crate::tui::app::Action;
     use crate::tui::app::tests::app_with;
+    use dlux_core::rpc::Download;
     use dlux_core::state::Filter;
     use ratatui::layout::Rect;
 
@@ -623,10 +660,12 @@ mod tests {
         app.on_key(key(KeyCode::Enter));
         assert!(error(&mut app).unwrap().contains("not-a-url"));
 
-        // Tab to the checkbox, toggle it with space, tab around to the URLs again.
+        // Tab to the "Start paused" checkbox, toggle it with space, tab past the Video
+        // checkbox and around to the URLs again.
         app.on_key(key(KeyCode::Tab));
         app.on_key(key(KeyCode::Tab));
         app.on_key(key(KeyCode::Char(' ')));
+        app.on_key(key(KeyCode::Tab));
         app.on_key(key(KeyCode::Tab));
         let Some(Dialog::Add(form)) = &app.dialog else {
             panic!()
@@ -701,5 +740,152 @@ mod tests {
         assert!(matches!(&app.dialog, Some(Dialog::Limits(f)) if f.target == Target::Global));
         app.on_feedback(Feedback::Limits(Target::Global, Limits::default()));
         assert_eq!(app.global_limits, Some(Limits::default()));
+    }
+
+    fn probed(url: &str) -> crate::tui::actions::Feedback {
+        let json = br#"{"title":"Me at the zoo","extractor_key":"Youtube","duration":19,
+            "formats":[{"format_id":"140","ext":"m4a","vcodec":"none","acodec":"mp4a","filesize":300000},
+                       {"format_id":"18","ext":"mp4","height":360,"vcodec":"avc1","acodec":"mp4a","filesize":800000},
+                       {"format_id":"136","ext":"mp4","height":720,"vcodec":"avc1","acodec":"none","filesize":2000000}]}"#;
+        crate::tui::actions::Feedback::Probe {
+            url: url.into(),
+            result: dlux_core::ytdlp::parse_probe(url, json),
+        }
+    }
+
+    #[test]
+    fn video_url_goes_through_the_format_picker() {
+        let url = "https://www.youtube.com/watch?v=jNQXAC9IVRw";
+        let mut app = app_with(&[]);
+        app.default_dir = "/dl".into();
+        app.on_paste(url);
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.take_actions(), vec![Action::Probe(url.into())]);
+        assert!(matches!(&app.dialog, Some(Dialog::Video(f)) if f.loading()));
+        app.on_key(key(KeyCode::Enter));
+        assert!(
+            app.take_actions().is_empty(),
+            "nothing to download while loading"
+        );
+
+        app.on_feedback(probed("https://other.example/"));
+        assert!(
+            matches!(&app.dialog, Some(Dialog::Video(f)) if f.loading()),
+            "other URL ignored"
+        );
+        app.on_feedback(probed(url));
+        let Some(Dialog::Video(form)) = &app.dialog else {
+            panic!()
+        };
+        let labels: Vec<_> = form
+            .info
+            .as_ref()
+            .unwrap()
+            .choices
+            .iter()
+            .map(|c| c.label.clone())
+            .collect();
+        assert_eq!(labels, vec!["Best quality (720p)", "360p", "Audio only"]);
+
+        app.on_key(key(KeyCode::Down));
+        app.on_key(key(KeyCode::Enter));
+        let actions = app.take_actions();
+        let [Action::StartVideo(spec)] = actions.as_slice() else {
+            panic!("unexpected {actions:?}");
+        };
+        assert_eq!(spec.selector, "bv*[height<=360]+ba/b[height<=360]");
+        assert_eq!(spec.dir, std::path::PathBuf::from("/dl"));
+        assert!(!spec.needs_merge);
+        assert!(app.dialog.is_none());
+        assert_eq!(app.filter, Filter::Active);
+    }
+
+    #[test]
+    fn unsupported_page_falls_back_to_a_file_download() {
+        let url = "https://example.com/watch";
+        let mut app = app_with(&[]);
+        app.dialog = Some(Dialog::Video(crate::tui::forms::VideoForm::new(
+            url.into(),
+            "/dl".into(),
+        )));
+        app.on_feedback(crate::tui::actions::Feedback::Probe {
+            url: url.into(),
+            result: Err(dlux_core::ytdlp::friendly_error("Unsupported URL: x")),
+        });
+        app.on_key(key(KeyCode::Enter));
+        match app.take_actions().as_slice() {
+            [Action::Add { sources, options }] => {
+                assert_eq!(sources, &[dlux_core::sources::Source::Url(url.into())]);
+                assert_eq!(options.dir.as_deref(), Some("/dl"));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        // Other errors offer a retry, and updating yt-dlp keeps the dialog open.
+        app.dialog = Some(Dialog::Video(crate::tui::forms::VideoForm::new(
+            url.into(),
+            "/dl".into(),
+        )));
+        app.on_feedback(crate::tui::actions::Feedback::Probe {
+            url: url.into(),
+            result: Err("Network error: timed out".into()),
+        });
+        app.on_key(key(KeyCode::Char('u')));
+        assert_eq!(app.take_actions(), vec![Action::UpdateYtDlp]);
+        assert!(app.dialog.is_some());
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.take_actions(), vec![Action::Probe(url.into())]);
+        assert!(matches!(&app.dialog, Some(Dialog::Video(f)) if f.loading()));
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.dialog.is_none());
+    }
+
+    #[test]
+    fn double_click_on_a_format_downloads_it() {
+        let url = "https://youtu.be/x";
+        let mut app = app_with(&[]);
+        app.dialog = Some(Dialog::Video(crate::tui::forms::VideoForm::new(
+            url.into(),
+            "/dl".into(),
+        )));
+        app.on_feedback(probed(url));
+        app.hits.dialog = Some(Rect::new(0, 0, 80, 20));
+        app.hits.choices = (0..3)
+            .map(|i| (Rect::new(2, 5 + i as u16, 70, 1), i))
+            .collect();
+        let t0 = Instant::now();
+        click(&mut app, 10, 7, t0);
+        assert!(matches!(&app.dialog, Some(Dialog::Video(f)) if f.cursor == 2));
+        assert!(app.take_actions().is_empty(), "a single click only selects");
+        click(&mut app, 10, 7, t0 + Duration::from_millis(100));
+        assert!(
+            matches!(app.take_actions().as_slice(), [Action::StartVideo(s)] if s.selector == "ba/b")
+        );
+    }
+
+    #[test]
+    fn local_jobs_follow_their_own_rules() {
+        let mut app = app_with(&[]);
+        let failed = Download {
+            error_message: Some("boom".into()),
+            ..crate::tui::app::tests::dl("dlux-4", dlux_core::rpc::DownloadStatus::Error)
+        };
+        app.state.set_local(vec![failed]);
+        app.set_filter(Filter::Errors);
+        app.select_gid("dlux-4");
+        assert!(app.can(Command::Resume), "a failed video can be retried");
+        app.on_key(key(KeyCode::Char('r')));
+        assert_eq!(app.take_actions(), vec![Action::Resume("dlux-4".into())]);
+        app.set_filter(Filter::Active);
+        app.state.set_local(vec![crate::tui::app::tests::dl(
+            "dlux-5",
+            dlux_core::rpc::DownloadStatus::Active,
+        )]);
+        app.select_gid("dlux-5");
+        assert!(
+            !app.can(Command::SpeedLimit),
+            "no per-download limit for yt-dlp jobs"
+        );
+        assert!(app.can(Command::Pause));
     }
 }

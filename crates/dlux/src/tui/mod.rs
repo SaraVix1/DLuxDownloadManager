@@ -16,6 +16,7 @@ use app::{App, ConnectionInfo};
 use crossterm::event::EventStream;
 use dlux_core::Config;
 use dlux_core::aria2::{Aria2, Origin};
+use dlux_core::jobs::JobManager;
 use dlux_core::state::{POLL_INTERVAL, spawn_poller};
 use futures_util::StreamExt;
 use theme::Theme;
@@ -41,7 +42,18 @@ pub async fn run(aria2: &Aria2, cfg: &Config) -> Result<()> {
     app.default_dir = cfg.download_dir().display().to_string();
     let (mut polls, poller) = spawn_poller(aria2.client().clone(), POLL_INTERVAL);
     let (feedback_tx, mut feedback) = mpsc::unbounded_channel();
+    // yt-dlp uses aria2c as its downloader too (its own process, not our RPC instance).
+    let aria2c = cfg
+        .aria2
+        .aria2c_path
+        .as_ref()
+        .map(dlux_core::paths::expand_tilde)
+        .filter(|p| p.is_file())
+        .or_else(|| dlux_core::paths::find_binary("aria2c"));
+    let jobs = JobManager::new(aria2c);
+    let jobs_changed = jobs.changed();
     let executor = Executor {
+        jobs: jobs.clone(),
         client: aria2.client().clone(),
         refresh: poller.refresher(),
         feedback: feedback_tx,
@@ -59,10 +71,14 @@ pub async fn run(aria2: &Aria2, cfg: &Config) -> Result<()> {
             guard.terminal.draw(|frame| ui::render(frame, &mut app))?;
             tokio::select! {
                 poll = polls.recv() => match poll {
-                    Some(event) => app.state.handle(event),
+                    Some(event) => {
+                        app.set_jobs(jobs.jobs());
+                        app.state.handle(event);
+                    }
                     None => bail!("the aria2 poller stopped unexpectedly"),
                 },
                 Some(message) = feedback.recv() => app.on_feedback(message),
+                () = jobs_changed.notified() => app.set_jobs(jobs.jobs()),
                 event = events.next() => match event {
                     Some(Ok(event)) => app.on_event(event),
                     Some(Err(e)) => return Err(e).context("reading terminal input"),
@@ -83,6 +99,8 @@ pub async fn run(aria2: &Aria2, cfg: &Config) -> Result<()> {
 
     drop(poller);
     drop(guard);
+    // Stop yt-dlp (and the aria2c it runs) after the terminal is restored.
+    jobs.shutdown().await;
     result
 }
 
