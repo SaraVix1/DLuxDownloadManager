@@ -77,7 +77,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: Swatinem/rust-cache@v2
       # Without web-dist the fallback page is embedded, which is fine for a compile check.
       - run: cargo check --locked --all-targets
