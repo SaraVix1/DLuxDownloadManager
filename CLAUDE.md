@@ -219,7 +219,7 @@ details. Keyboard too: j/k, a, p, r, d, tab, ?, q.
   so the binary needs only glibc. `cliff.toml` + generated `CHANGELOG.md`; README rewritten
   (install, usage, key/mouse tables, web security, config, systemd, troubleshooting) with
   screenshots in `docs/screenshots/` (TUI captured from tmux and rendered through Chrome, web via
-  playwright). CONTRIBUTING, CODE_OF_CONDUCT (Contributor Covenant 2.1 by reference — reporting
-  contact still a placeholder), SECURITY, issue forms, PR template. Verified locally: MSRV check,
+  playwright). CONTRIBUTING, CODE_OF_CONDUCT (Contributor Covenant 2.1 by reference — reports go
+  through GitHub's private reporting form, titled "Conduct:"), SECURITY, issue forms, PR template. Verified locally: MSRV check,
   release build, `.deb` contents, `cargo package -p dlux-core`, package file list of dlux. Not
   verifiable here: the workflows themselves (no actionlint) and the Windows build.
