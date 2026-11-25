@@ -157,9 +157,11 @@ async fn spawns_controls_and_stops_aria2() {
     ));
 
     aria2.shutdown().await;
+    // Long enough for Windows, which retries a refused localhost connection for ~2 s before
+    // failing (a short timeout would report a timeout instead of "connection refused").
     assert!(
         client
-            .ping(Duration::from_millis(300))
+            .ping(Duration::from_secs(5))
             .await
             .unwrap_err()
             .is_connect(),
