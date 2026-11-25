@@ -55,7 +55,9 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends aria2
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --all-targets -- -D warnings
-      - run: cargo test --locked --all-targets
+      - name: cargo test
+        shell: bash
+        run: bash .github/scripts/test.sh
 
   windows:
     name: build, test (Windows)
@@ -70,7 +72,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked --all-targets
-      - run: cargo test --locked --all-targets
+      - name: cargo test
+        shell: bash
+        run: bash .github/scripts/test.sh
 
   msrv:
     name: MSRV (Rust 1.88)
