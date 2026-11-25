@@ -327,11 +327,13 @@ short  yt-dlp_macos
             let file = std::fs::File::create(&archive).unwrap();
             let xz = liblzma::write::XzEncoder::new(file, 1);
             let mut tar = tar::Builder::new(xz);
+            // The extractor wants this platform's names (`ffmpeg.exe` on Windows).
+            let (ffmpeg, ffprobe) = (Tool::exe("ffmpeg"), Tool::exe("ffprobe"));
             for (path, body) in [
-                ("ffmpeg-master/bin/ffmpeg", &b"#!ffmpeg"[..]),
-                ("ffmpeg-master/bin/ffprobe", b"#!ffprobe"),
-                ("ffmpeg-master/doc/ffmpeg", b"not this one"),
-                ("ffmpeg-master/LICENSE.txt", b"GPL"),
+                (format!("ffmpeg-master/bin/{ffmpeg}"), &b"#!ffmpeg"[..]),
+                (format!("ffmpeg-master/bin/{ffprobe}"), b"#!ffprobe"),
+                (format!("ffmpeg-master/doc/{ffmpeg}"), b"not this one"),
+                ("ffmpeg-master/LICENSE.txt".to_owned(), b"GPL"),
             ] {
                 let mut header = tar::Header::new_gnu();
                 header.set_size(body.len() as u64);
@@ -344,8 +346,9 @@ short  yt-dlp_macos
         let bin = dir.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
         extract_ffmpeg(&archive, "x.tar.xz", &bin).unwrap();
-        assert_eq!(std::fs::read(bin.join("ffmpeg")).unwrap(), b"#!ffmpeg");
-        assert_eq!(std::fs::read(bin.join("ffprobe")).unwrap(), b"#!ffprobe");
+        let read = |name: &str| std::fs::read(bin.join(Tool::exe(name))).unwrap();
+        assert_eq!(read("ffmpeg"), b"#!ffmpeg");
+        assert_eq!(read("ffprobe"), b"#!ffprobe");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

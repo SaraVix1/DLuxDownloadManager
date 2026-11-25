@@ -13,3 +13,6 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: monthly }
+    ignore:
+      # The MSRV job pins the oldest supported Rust on purpose (`@1.88` is a toolchain, not a tag).
+      - dependency-name: dtolnay/rust-toolchain
